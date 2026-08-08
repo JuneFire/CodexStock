@@ -260,11 +260,6 @@
     watchOnly: false,
     watchlist: loadWatchlist(),
     sort: { key: 'score', dir: 'desc' },
-    filters: {
-      changeMin: '', changeMax: '', amountMin: '', ratioMin: '', strengthMin: '',
-      turnoverMin: '', turnoverMax: '', volMin: '', capMin: '', capMax: '', scoreMin: '',
-      tag: 'all', sectors: []
-    }
   };
 
   // ---------- DOM 引用 ----------
@@ -282,9 +277,6 @@
     marketTime: $('#marketTime'),
     marketIndices: $('#marketIndices'),
     marketBreadth: $('#marketBreadth'),
-    filters: $('#filters'),
-    btnReset: $('#btnReset'),
-    sectorChips: $('#sectorChips'),
     stats: $('#stats'),
     topMeta: $('#topMeta'),
     topList: $('#topList'),
@@ -437,26 +429,8 @@
     }).join('');
   }
   function getFiltered() {
-    const f = state.filters;
     const q = state.search.trim().toLowerCase();
-    const sectors = f.sectors;
-    const num = (v) => (v == null || v === '' ? null : Number(v));
-
     const out = state.stocks.filter(s => {
-      const change = Number(s.changePct);
-      if (num(f.changeMin) != null && (change == null || !Number.isFinite(change) || change < num(f.changeMin))) return false;
-      if (num(f.changeMax) != null && (change == null || !Number.isFinite(change) || change > num(f.changeMax))) return false;
-      if (num(f.amountMin) != null && (Number(s.auctionAmount) || 0) / 1e4 < num(f.amountMin)) return false;
-      if (num(f.ratioMin) != null && (Number(s.ratioToYesterday) || 0) < num(f.ratioMin)) return false;
-      if (num(f.strengthMin) != null && (Number(s.amountStrength) || 0) < num(f.strengthMin)) return false;
-      if (num(f.turnoverMin) != null && (Number(s.auctionTurnover) || 0) < num(f.turnoverMin)) return false;
-      if (num(f.turnoverMax) != null && (Number(s.auctionTurnover) || 0) > num(f.turnoverMax)) return false;
-      if (num(f.volMin) != null && (Number(s.volumeRatio) || 0) < num(f.volMin)) return false;
-      if (num(f.capMin) != null && (Number(s.floatCap) || 0) / 1e8 < num(f.capMin)) return false;
-      if (num(f.capMax) != null && (Number(s.floatCap) || 0) / 1e8 > num(f.capMax)) return false;
-      if (num(f.scoreMin) != null && (Number(s.score) || 0) < num(f.scoreMin)) return false;
-      if (f.tag !== 'all' && !(s.tags || []).includes(f.tag)) return false;
-      if (sectors.length && !sectors.includes(s.industry)) return false;
       if (state.watchOnly && !state.watchlist.includes(s.code)) return false;
       if (q) {
         const hay = (s.code + ' ' + s.name + ' ' + s.industry).toLowerCase();
@@ -471,8 +445,10 @@
     const { key, dir } = state.sort;
     const sign = dir === 'desc' ? -1 : 1;
     return [...list].sort((a, b) => {
-      const av = a[key];
-      const bv = b[key];
+      let av = a[key];
+      let bv = b[key];
+      if (Array.isArray(av)) av = av.join('|');
+      if (Array.isArray(bv)) bv = bv.join('|');
       if (typeof av === 'string' || typeof bv === 'string') {
         return String(av || '').localeCompare(String(bv || ''), 'zh') * sign;
       }
@@ -544,21 +520,7 @@
     });
   }
 
-  function renderSectorChips() {
-    const counts = {};
-    state.stocks.forEach(s => {
-      counts[s.industry] = (counts[s.industry] || 0) + 1;
-    });
-    const sectors = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
-    const active = state.filters.sectors;
-    const allActive = active.length === 0;
-    els.sectorChips.innerHTML = `
-      <button class="chip ${allActive ? 'is-active' : ''}" data-sector="" type="button">全部</button>
-      ${sectors.map(sector => `
-        <button class="chip ${active.includes(sector) ? 'is-active' : ''}" data-sector="${esc(sector)}" type="button">${esc(sector)} ${counts[sector]}</button>
-      `).join('')}
-    `;
-  }
+
 
   function renderDetail() {
     const s = state.stocks.find(x => x.code === state.selectedCode);
@@ -656,7 +618,6 @@
     renderStats();
     renderTop10();
     renderTable();
-    renderSectorChips();
     renderDetail();
     refreshIcons();
   }
@@ -762,14 +723,6 @@
   }
   // ---------- 筛选交互 ----------
   function resetFilters(render = true) {
-    const f = state.filters;
-    Object.keys(f).forEach(k => {
-      if (k === 'sectors') f[k] = [];
-      else if (k === 'tag') f[k] = 'all';
-      else f[k] = '';
-    });
-    els.filters.querySelectorAll('input').forEach(inp => { inp.value = ''; });
-    els.filters.querySelectorAll('select').forEach(sel => { sel.value = 'all'; });
     state.search = '';
     els.searchInput.value = '';
     state.watchOnly = false;
@@ -990,34 +943,10 @@
     });
     els.btnTemplate.addEventListener('click', downloadTemplate);
     els.btnExport.addEventListener('click', exportResults);
-    els.btnReset.addEventListener('click', () => resetFilters());
 
-    const onFilter = e => {
-      const el = e.target;
-      if (!el || !el.dataset || !el.dataset.filter) return;
-      const key = el.dataset.filter;
-      if (key === 'tag') state.filters.tag = el.value;
-      else state.filters[key] = el.value;
-      renderTable();
-      renderStats();
-    };
-    els.filters.addEventListener('input', onFilter);
-    els.filters.addEventListener('change', onFilter);
 
-    els.sectorChips.addEventListener('click', e => {
-      const btn = e.target.closest('.chip');
-      if (!btn) return;
-      const sector = btn.getAttribute('data-sector');
-      if (sector === '') state.filters.sectors = [];
-      else {
-        const idx = state.filters.sectors.indexOf(sector);
-        if (idx >= 0) state.filters.sectors.splice(idx, 1);
-        else state.filters.sectors.push(sector);
-      }
-      renderSectorChips();
-      renderTable();
-      renderStats();
-    });
+
+
 
     els.searchInput.addEventListener('input', () => {
       state.search = els.searchInput.value;

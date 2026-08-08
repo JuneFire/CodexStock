@@ -2,7 +2,7 @@
 """竞价选股器本地服务
 
 用法:
-    python server.py [--port 8010]
+    python backend/server.py [--port 8010]
 
 接口:
     GET /api/refresh   抓取东方财富竞价数据并计算超预期分数
@@ -21,8 +21,10 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from urllib.request import Request, urlopen
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(ROOT, "data")
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FRONTEND_DIR = os.path.join(PROJECT_ROOT, "frontend")
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 LATEST_FILE = os.path.join(DATA_DIR, "latest.json")
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -333,7 +335,7 @@ def load_latest():
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=ROOT, **kwargs)
+        super().__init__(*args, directory=FRONTEND_DIR, **kwargs)
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")

@@ -27,13 +27,14 @@
         <button id="btnRefreshDemo" class="btn" type="button" data-tooltip="无行情时生成一批演示数据">
           <i data-lucide="flask-conical" aria-hidden="true"></i><span>演示数据</span>
         </button>
+
         <button id="btnImport" class="btn" type="button" data-tooltip="支持 UTF-8 或 GBK 编码的 CSV">
           <i data-lucide="upload" aria-hidden="true"></i><span>导入 CSV</span>
         </button>
         <button id="btnTemplate" class="btn btn-ghost" type="button">
           <i data-lucide="file-down" aria-hidden="true"></i><span>模板</span>
         </button>
-        <button id="btnExport" class="btn btn-ghost" type="button" data-tooltip="导出当前筛选结果">
+        <button id="btnExport" class="btn btn-ghost" type="button" data-tooltip="导出当前结果">
           <i data-lucide="download" aria-hidden="true"></i><span>导出结果</span>
         </button>
         <input id="fileInput" type="file" accept=".csv,.txt" hidden>
@@ -51,85 +52,10 @@
           <div id="marketBreadth" class="breadth"></div>
         </section>
 
-        <section class="panel filter-panel">
-          <div class="panel-head">
-            <h2>筛选条件</h2>
-            <button id="btnReset" class="btn btn-ghost btn-sm" type="button">
-              <i data-lucide="rotate-ccw" aria-hidden="true"></i><span>重置</span>
-            </button>
-          </div>
-          <div class="filters" id="filters">
-            <div class="filter-field">
-              <label class="filter-label" for="fChangeMin">竞价涨幅 %</label>
-              <div class="range-inputs">
-                <input id="fChangeMin" data-filter="changeMin" type="number" inputmode="decimal" min="-20" max="20" step="0.1" placeholder="≥">
-                <span class="range-sep">—</span>
-                <input id="fChangeMax" data-filter="changeMax" type="number" inputmode="decimal" min="-20" max="20" step="0.1" placeholder="≤">
-              </div>
-            </div>
-            <div class="filter-field">
-              <label class="filter-label" for="fAmountMin">竞价金额 万元</label>
-              <div class="range-inputs">
-                <input id="fAmountMin" data-filter="amountMin" type="number" inputmode="decimal" min="0" step="100" placeholder="≥">
-              </div>
-            </div>
-            <div class="filter-field">
-              <label class="filter-label" for="fRatioMin">竞价占昨日成交 %</label>
-              <div class="range-inputs">
-                <input id="fRatioMin" data-filter="ratioMin" type="number" inputmode="decimal" min="0" step="0.1" placeholder="≥">
-              </div>
-            </div>
-            <div class="filter-field">
-              <label class="filter-label" for="fStrengthMin">金额强度 bp ≥</label>
-              <div class="range-inputs">
-                <input id="fStrengthMin" data-filter="strengthMin" type="number" inputmode="decimal" min="0" step="0.1" placeholder="≥">
-              </div>
-            </div>
-            <div class="filter-field">
-              <label class="filter-label" for="fTurnoverMin">竞价换手 %</label>
-              <div class="range-inputs">
-                <input id="fTurnoverMin" data-filter="turnoverMin" type="number" inputmode="decimal" min="0" step="0.1" placeholder="≥">
-                <span class="range-sep">—</span>
-                <input id="fTurnoverMax" data-filter="turnoverMax" type="number" inputmode="decimal" min="0" step="0.1" placeholder="≤">
-              </div>
-            </div>
-            <div class="filter-field">
-              <label class="filter-label" for="fVolMin">量比 ≥</label>
-              <input id="fVolMin" data-filter="volMin" type="number" inputmode="decimal" min="0" step="0.1" placeholder="≥">
-            </div>
-            <div class="filter-field">
-              <label class="filter-label" for="fCapMin">流通市值 亿</label>
-              <div class="range-inputs">
-                <input id="fCapMin" data-filter="capMin" type="number" inputmode="decimal" min="0" step="10" placeholder="≥">
-                <span class="range-sep">—</span>
-                <input id="fCapMax" data-filter="capMax" type="number" inputmode="decimal" min="0" step="10" placeholder="≤">
-              </div>
-            </div>
-            <div class="filter-field">
-              <label class="filter-label" for="fScoreMin">超预期分 ≥</label>
-              <input id="fScoreMin" data-filter="scoreMin" type="number" inputmode="numeric" min="0" max="100" step="1" placeholder="≥">
-            </div>
-            <div class="filter-field">
-              <label class="filter-label" for="fTag">状态</label>
-              <select id="fTag" data-filter="tag" class="select">
-                <option value="all">全部</option>
-                <option value="超预期">超预期</option>
-                <option value="高金额强度">高金额强度</option>
-                <option value="大幅放量">大幅放量</option>
-                <option value="高换手">高换手</option>
-                <option value="高开">高开</option>
-              </select>
-            </div>
-            <div class="filter-field filter-sectors">
-              <span class="filter-label">板块</span>
-              <div class="sector-chips" id="sectorChips"></div>
-            </div>
-          </div>
-        </section>
       </aside>
 
       <main class="main">
-        <section class="stats" id="stats" aria-label="筛选统计"></section>
+        <section class="stats" id="stats" aria-label="统计"></section>
 
         <section class="panel top-panel" id="topPanel">
           <div class="panel-head">
@@ -159,7 +85,7 @@
                 <tr>
                   <th class="th-star" aria-label="自选"></th>
                   <th class="sortable" data-key="code">代码</th>
-                  <th>名称 / 板块</th>
+                  <th class="sortable" data-key="name">名称 / 板块</th>
                   <th class="sortable" data-key="price">竞价价</th>
                   <th class="sortable" data-key="changePct">竞价涨幅</th>
                   <th class="sortable" data-key="auctionAmount">竞价金额</th>
@@ -170,7 +96,7 @@
                   <th class="sortable col-vol" data-key="volumeRatio">量比</th>
                   <th class="sortable col-market" data-key="floatCap">流通市值</th>
                   <th class="sortable" data-key="score">超预期分</th>
-                  <th>状态</th>
+                  <th class="sortable" data-key="tags">状态</th>
                 </tr>
               </thead>
               <tbody id="stockBody"></tbody>

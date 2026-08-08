@@ -1201,3 +1201,101 @@ input[type="search"] {
     display: none;
   }
 }
+/* ---------- 历史竞价页面 ---------- */
+.history-layout {
+  grid-template-columns: 240px minmax(0, 1fr);
+}
+
+.history-layout.has-detail {
+  grid-template-columns: 240px minmax(0, 1fr) 372px;
+}
+
+.history-sidebar .panel {
+  position: sticky;
+  top: 64px;
+}
+
+.date-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: calc(100vh - 170px);
+  overflow-y: auto;
+}
+
+.date-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.date-item:hover {
+  border-color: var(--text-3);
+}
+
+.date-item.is-active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+}
+
+.date-empty {
+  padding: 14px 8px;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+.btn-link {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+}
+
+.btn-link:hover {
+  text-decoration: underline;
+}
+
+.stat-value-sm {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: normal;
+  overflow: visible;
+}
+
+.history-stock-table {
+  overflow-x: auto;
+}
+
+.table-sm th,
+.table-sm td {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+@media (max-width: 1180px) {
+  .history-layout.has-detail {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 980px) {
+  .history-layout,
+  .history-layout.has-detail {
+    grid-template-columns: 1fr;
+  }
+}
