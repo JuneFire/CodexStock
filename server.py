@@ -2,7 +2,7 @@
 """竞价选股器本地服务
 
 用法:
-    python server.py [--port 8000]
+    python server.py [--port 8010]
 
 接口:
     GET /api/refresh   抓取东方财富竞价数据并计算超预期分数
@@ -373,7 +373,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description="竞价选股器本地服务")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8010")))
     parser.add_argument("--no-auto", action="store_true", help="关闭交易日 9:25-9:30 的自动抓取")
     args = parser.parse_args()
     os.makedirs(DATA_DIR, exist_ok=True)
