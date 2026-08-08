@@ -122,6 +122,11 @@ i[data-lucide] {
   color: var(--warn);
 }
 
+.source-badge.is-stale {
+  background: #fdecec;
+  color: #b3261e;
+}
+
 .auto-badge {
   display: inline-flex;
   align-items: center;

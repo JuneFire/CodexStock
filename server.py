@@ -52,8 +52,8 @@ INDEX_NAMES = {"000001": "上证指数", "399001": "深证成指", "399006": "�
 _lock = threading.Lock()
 _fetch_lock = threading.Lock()
 
-# 每个交易日 9:25 竞价结束后自动抓取一次，窗口约 30 分钟
-AUTO_FETCH_WINDOW = (9 * 60 + 25, 9 * 60 + 55)
+# 竞价金额/换手只在交易日 9:25 竞价结束后、开盘前有效，9:30 后 f6/f8 变为全天累计值
+AUTO_FETCH_WINDOW = (9 * 60 + 25, 9 * 60 + 30)
 AUTO_FETCH_TICK = 20
 
 
@@ -76,6 +76,31 @@ def to_float(value):
         return float(text)
     except ValueError:
         return None
+
+
+def is_trading_day(now=None):
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    try:
+        data = http_json(KLINE_URL.format(secid="1.000001"))
+        klines = ((data.get("data") or {}).get("klines")) or []
+        today = now.strftime("%Y-%m-%d")
+        return any((line.split(",")[0] if line else "") == today for line in klines)
+    except Exception:
+        return True
+
+
+def auction_window_status(now=None):
+    now = now or datetime.now()
+    hm = now.hour * 60 + now.minute
+    if now.weekday() >= 5:
+        return False, "周末休市，竞价数据不可用"
+    if not (AUTO_FETCH_WINDOW[0] <= hm < AUTO_FETCH_WINDOW[1]):
+        return False, "当前不在竞价窗口（交易日 9:25-9:30），请到时再抓取"
+    if not is_trading_day(now):
+        return False, "今天休市，竞价数据不可用"
+    return True, ""
 
 
 def secid_of(code):
@@ -136,7 +161,7 @@ def fetch_yesterday_metric(stock):
             if parts and parts[0] < today:
                 prev = parts
         if prev is None:
-            prev = klines[-1].split(",")
+            return None
         # f57=成交额(元), f61=换手率(%), f53=收盘价
         return {
             "yesterdayAmount": to_float(prev[6]) if len(prev) > 6 else None,
@@ -256,6 +281,7 @@ def _build_snapshot(auto=False):
         "fetchedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "source": "东方财富",
         "auto": auto,
+        "validForAuction": True,
         "market": {
             "indices": fetch_indices(),
             "up": breadth_up,
@@ -286,9 +312,8 @@ def auto_fetch_loop(enabled=True):
     while True:
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
-        hm = now.hour * 60 + now.minute
-        in_window = AUTO_FETCH_WINDOW[0] <= hm < AUTO_FETCH_WINDOW[1]
-        if fetched_date != today and now.weekday() < 5 and in_window:
+        valid, _ = auction_window_status(now)
+        if fetched_date != today and valid:
             print("[auto] 交易日竞价已结束，开始自动抓取", flush=True)
             try:
                 build_snapshot(auto=True)
@@ -328,6 +353,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(load_latest())
             return
         if parsed.path == "/api/refresh":
+            valid, message = auction_window_status()
+            if not valid:
+                self.send_json({"ok": False, "error": message}, status=400)
+                return
             try:
                 payload = build_snapshot()
                 self.send_json(payload)
@@ -345,14 +374,14 @@ class Handler(SimpleHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="竞价选股器本地服务")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
-    parser.add_argument("--no-auto", action="store_true", help="关闭交易日 9:25 后的自动抓取")
+    parser.add_argument("--no-auto", action="store_true", help="关闭交易日 9:25-9:30 的自动抓取")
     args = parser.parse_args()
     os.makedirs(DATA_DIR, exist_ok=True)
     threading.Thread(target=auto_fetch_loop, args=(not args.no_auto,), daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     print("竞价选股器已启动: http://127.0.0.1:%d" % args.port, flush=True)
     if not args.no_auto:
-        print("[auto] 自动抓取已开启：每个交易日 9:25-9:55", flush=True)
+        print("[auto] 自动抓取已开启：每个交易日 9:25-9:30", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

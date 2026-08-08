@@ -253,6 +253,7 @@
     market: null,
     source: '未加载',
     auto: false,
+    validForAuction: true,
     lastUpdate: '',
     selectedCode: null,
     search: '',
@@ -318,8 +319,19 @@
   }
 
   function updateSourceBadge() {
-    els.sourceBadge.textContent = state.source + (state.lastUpdate ? ' · ' + state.lastUpdate.slice(11, 16) : '');
-    els.sourceBadge.classList.toggle('is-live', state.source === '东方财富');
+    const isEastmoney = state.source === '东方财富';
+    const last = String(state.lastUpdate || '');
+    const snapshotDate = last.slice(0, 10);
+    const now = new Date();
+    const todayStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    const isToday = snapshotDate === todayStr;
+    const parts = [state.source];
+    if (last) parts.push(last.slice(11, 16));
+    if (isEastmoney && snapshotDate && !isToday) parts.push('非今日');
+    if (isEastmoney && !state.validForAuction) parts.push('非竞价快照');
+    els.sourceBadge.textContent = parts.join(' · ');
+    els.sourceBadge.classList.toggle('is-live', isEastmoney && state.validForAuction && isToday);
+    els.sourceBadge.classList.toggle('is-stale', isEastmoney && (!state.validForAuction || !isToday));
   }
 
   function updateAutoBadge() {
@@ -672,12 +684,21 @@
     });
   }
 
+  function isAuctionSnapshot(data) {
+    if (data.validForAuction === true) return true;
+    const m = String(data.fetchedAt || '').match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/);
+    if (!m) return false;
+    const hm = Number(m[4]) * 60 + Number(m[5]);
+    return hm >= 9 * 60 + 25 && hm < 9 * 60 + 30;
+  }
+
   function loadSnapshot(data) {
     state.stocks = (data.stocks || []).map(normalizeStock);
     state.market = data.market || demoMarket(state.stocks);
     state.source = data.source || '东方财富';
     state.auto = !!data.auto;
     state.lastUpdate = data.fetchedAt || data.date || '';
+    state.validForAuction = isAuctionSnapshot(data);
     state.selectedCode = null;
     resetFilters(false);
     renderAll();
@@ -688,6 +709,7 @@
     state.market = demoMarket(state.stocks);
     state.source = '演示数据';
     state.auto = false;
+    state.validForAuction = true;
     state.lastUpdate = new Date().toLocaleString('zh-CN', { hour12: false });
     state.selectedCode = null;
     resetFilters(false);
@@ -699,6 +721,7 @@
     state.market = demoMarket(stocks);
     state.source = sourceLabel;
     state.auto = false;
+    state.validForAuction = true;
     state.lastUpdate = new Date().toLocaleString('zh-CN', { hour12: false });
     state.selectedCode = null;
     resetFilters(false);
@@ -733,7 +756,7 @@
       const data = await res.json();
       if (data && data.ok && data.stocks && data.stocks.length) {
         loadSnapshot(data);
-        toast('已加载最近一次抓取快照');
+        toast(state.validForAuction ? '已加载最近一次竞价快照' : '已加载缓存数据（非竞价时段快照）');
       }
     } catch (e) { /* 静态打开时保持演示数据 */ }
   }
