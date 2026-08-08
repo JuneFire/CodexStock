@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>竞价选股器</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark"><i data-lucide="candlestick-chart" aria-hidden="true"></i></span>
+        <div class="brand-text">
+          <h1>竞价选股器</h1>
+          <p id="marketPhase">—</p>
+        </div>
+      </div>
+      <div class="topbar-tools">
+        <span id="sourceBadge" class="source-badge">未加载</span>
+        <span id="autoBadge" class="auto-badge"><i data-lucide="calendar-clock" aria-hidden="true"></i><span>9:25 自动抓取</span></span>
+        <button id="btnFetch" class="btn btn-primary" type="button" data-tooltip="9:25 后从东方财富抓取竞价金额前 200">
+          <i data-lucide="radar" aria-hidden="true"></i><span>抓取竞价数据</span>
+        </button>
+        <button id="btnRefreshDemo" class="btn" type="button" data-tooltip="无行情时生成一批演示数据">
+          <i data-lucide="flask-conical" aria-hidden="true"></i><span>演示数据</span>
+        </button>
+        <button id="btnImport" class="btn" type="button" data-tooltip="支持 UTF-8 或 GBK 编码的 CSV">
+          <i data-lucide="upload" aria-hidden="true"></i><span>导入 CSV</span>
+        </button>
+        <button id="btnTemplate" class="btn btn-ghost" type="button">
+          <i data-lucide="file-down" aria-hidden="true"></i><span>模板</span>
+        </button>
+        <button id="btnExport" class="btn btn-ghost" type="button" data-tooltip="导出当前筛选结果">
+          <i data-lucide="download" aria-hidden="true"></i><span>导出结果</span>
+        </button>
+        <input id="fileInput" type="file" accept=".csv,.txt" hidden>
+      </div>
+    </header>
+
+    <div class="layout" id="layout">
+      <aside class="sidebar">
+        <section class="panel market-panel">
+          <div class="panel-head">
+            <h2>数据快照</h2>
+            <span id="marketTime" class="panel-meta">—</span>
+          </div>
+          <div id="marketIndices" class="indices"></div>
+          <div id="marketBreadth" class="breadth"></div>
+        </section>
+
+        <section class="panel filter-panel">
+          <div class="panel-head">
+            <h2>筛选条件</h2>
+            <button id="btnReset" class="btn btn-ghost btn-sm" type="button">
+              <i data-lucide="rotate-ccw" aria-hidden="true"></i><span>重置</span>
+            </button>
+          </div>
+          <div class="filters" id="filters">
+            <div class="filter-field">
+              <label class="filter-label" for="fChangeMin">竞价涨幅 %</label>
+              <div class="range-inputs">
+                <input id="fChangeMin" data-filter="changeMin" type="number" inputmode="decimal" min="-20" max="20" step="0.1" placeholder="≥">
+                <span class="range-sep">—</span>
+                <input id="fChangeMax" data-filter="changeMax" type="number" inputmode="decimal" min="-20" max="20" step="0.1" placeholder="≤">
+              </div>
+            </div>
+            <div class="filter-field">
+              <label class="filter-label" for="fAmountMin">竞价金额 万元</label>
+              <div class="range-inputs">
+                <input id="fAmountMin" data-filter="amountMin" type="number" inputmode="decimal" min="0" step="100" placeholder="≥">
+              </div>
+            </div>
+            <div class="filter-field">
+              <label class="filter-label" for="fRatioMin">竞价占昨日成交 %</label>
+              <div class="range-inputs">
+                <input id="fRatioMin" data-filter="ratioMin" type="number" inputmode="decimal" min="0" step="0.1" placeholder="≥">
+              </div>
+            </div>
+            <div class="filter-field">
+              <label class="filter-label" for="fStrengthMin">金额强度 bp ≥</label>
+              <div class="range-inputs">
+                <input id="fStrengthMin" data-filter="strengthMin" type="number" inputmode="decimal" min="0" step="0.1" placeholder="≥">
+              </div>
+            </div>
+            <div class="filter-field">
+              <label class="filter-label" for="fTurnoverMin">竞价换手 %</label>
+              <div class="range-inputs">
+                <input id="fTurnoverMin" data-filter="turnoverMin" type="number" inputmode="decimal" min="0" step="0.1" placeholder="≥">
+                <span class="range-sep">—</span>
+                <input id="fTurnoverMax" data-filter="turnoverMax" type="number" inputmode="decimal" min="0" step="0.1" placeholder="≤">
+              </div>
+            </div>
+            <div class="filter-field">
+              <label class="filter-label" for="fVolMin">量比 ≥</label>
+              <input id="fVolMin" data-filter="volMin" type="number" inputmode="decimal" min="0" step="0.1" placeholder="≥">
+            </div>
+            <div class="filter-field">
+              <label class="filter-label" for="fCapMin">流通市值 亿</label>
+              <div class="range-inputs">
+                <input id="fCapMin" data-filter="capMin" type="number" inputmode="decimal" min="0" step="10" placeholder="≥">
+                <span class="range-sep">—</span>
+                <input id="fCapMax" data-filter="capMax" type="number" inputmode="decimal" min="0" step="10" placeholder="≤">
+              </div>
+            </div>
+            <div class="filter-field">
+              <label class="filter-label" for="fScoreMin">超预期分 ≥</label>
+              <input id="fScoreMin" data-filter="scoreMin" type="number" inputmode="numeric" min="0" max="100" step="1" placeholder="≥">
+            </div>
+            <div class="filter-field">
+              <label class="filter-label" for="fTag">状态</label>
+              <select id="fTag" data-filter="tag" class="select">
+                <option value="all">全部</option>
+                <option value="超预期">超预期</option>
+                <option value="高金额强度">高金额强度</option>
+                <option value="大幅放量">大幅放量</option>
+                <option value="高换手">高换手</option>
+                <option value="高开">高开</option>
+              </select>
+            </div>
+            <div class="filter-field filter-sectors">
+              <span class="filter-label">板块</span>
+              <div class="sector-chips" id="sectorChips"></div>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <section class="stats" id="stats" aria-label="筛选统计"></section>
+
+        <section class="panel top-panel" id="topPanel">
+          <div class="panel-head">
+            <h2>今日竞价 Top10</h2>
+            <span id="topMeta" class="panel-meta">—</span>
+          </div>
+          <div id="topList" class="top-list"></div>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="table-head">
+            <div class="search-box">
+              <i data-lucide="search" aria-hidden="true"></i>
+              <input id="searchInput" type="search" placeholder="代码 / 名称 / 板块" aria-label="搜索股票">
+            </div>
+            <div class="table-actions">
+              <label class="check-label">
+                <input id="watchOnly" type="checkbox">
+                <span>只看自选</span>
+              </label>
+              <span id="resultCount" class="muted">—</span>
+            </div>
+          </div>
+          <div class="table-responsive">
+            <table class="table" id="stockTable">
+              <thead>
+                <tr>
+                  <th class="th-star" aria-label="自选"></th>
+                  <th class="sortable" data-key="code">代码</th>
+                  <th>名称 / 板块</th>
+                  <th class="sortable" data-key="price">竞价价</th>
+                  <th class="sortable" data-key="changePct">竞价涨幅</th>
+                  <th class="sortable" data-key="auctionAmount">竞价金额</th>
+                  <th class="sortable col-yamount" data-key="yesterdayAmount">昨日成交额</th>
+                  <th class="sortable col-ratio" data-key="ratioToYesterday">竞价占比</th>
+                  <th class="sortable col-strength" data-key="amountStrength">金额强度</th>
+                  <th class="sortable col-auctionTurnover" data-key="auctionTurnover">竞价换手</th>
+                  <th class="sortable col-vol" data-key="volumeRatio">量比</th>
+                  <th class="sortable col-market" data-key="floatCap">流通市值</th>
+                  <th class="sortable" data-key="score">超预期分</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody id="stockBody"></tbody>
+            </table>
+          </div>
+          <div id="emptyState" class="empty-state" hidden>
+            <i data-lucide="filter-x" aria-hidden="true"></i>
+            <span>没有符合条件的股票</span>
+          </div>
+        </section>
+      </main>
+
+      <aside class="detail-panel" id="detailPanel" hidden aria-label="个股详情">
+        <div id="detailContent"></div>
+      </aside>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
