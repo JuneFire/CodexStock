@@ -21,7 +21,7 @@
       <div class="topbar-tools">
         <span id="sourceBadge" class="source-badge">未加载</span>
         <span id="autoBadge" class="auto-badge"><i data-lucide="calendar-clock" aria-hidden="true"></i><span>9:25 自动抓取</span></span>
-        <button id="btnFetch" class="btn btn-primary" type="button" data-tooltip="9:25 后从东方财富抓取竞价金额前 200">
+        <button id="btnFetch" class="btn btn-primary" type="button" data-tooltip="9:25 后抓取竞价金额前 200（腾讯优先，东财兜底）">
           <i data-lucide="radar" aria-hidden="true"></i><span>抓取竞价数据</span>
         </button>
         <button id="btnRefreshDemo" class="btn" type="button" data-tooltip="无行情时生成一批演示数据">
@@ -50,6 +50,13 @@
           </div>
           <div id="marketIndices" class="indices"></div>
           <div id="marketBreadth" class="breadth"></div>
+        </section>
+
+        <section class="panel filter-panel">
+          <div class="panel-head">
+            <h2>板块</h2>
+          </div>
+          <div class="sector-chips" id="sectorChips"></div>
         </section>
 
       </aside>

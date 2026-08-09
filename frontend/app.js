@@ -257,6 +257,7 @@
     lastUpdate: '',
     selectedCode: null,
     search: '',
+    sectors: [],
     watchOnly: false,
     watchlist: loadWatchlist(),
     sort: { key: 'score', dir: 'desc' },
@@ -277,6 +278,7 @@
     marketTime: $('#marketTime'),
     marketIndices: $('#marketIndices'),
     marketBreadth: $('#marketBreadth'),
+    sectorChips: $('#sectorChips'),
     stats: $('#stats'),
     topMeta: $('#topMeta'),
     topList: $('#topList'),
@@ -311,19 +313,20 @@
   }
 
   function updateSourceBadge() {
-    const isEastmoney = state.source === '东方财富';
     const last = String(state.lastUpdate || '');
     const snapshotDate = last.slice(0, 10);
     const now = new Date();
     const todayStr = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
     const isToday = snapshotDate === todayStr;
+    const isFeed = state.source !== '演示数据' && state.source !== '导入CSV';
+    const isLive = isFeed && state.validForAuction && isToday;
     const parts = [state.source];
     if (last) parts.push(last.slice(11, 16));
-    if (isEastmoney && snapshotDate && !isToday) parts.push('非今日');
-    if (isEastmoney && !state.validForAuction) parts.push('非竞价快照');
+    if (snapshotDate && !isToday) parts.push('非今日');
+    if (!state.validForAuction) parts.push('非竞价快照');
     els.sourceBadge.textContent = parts.join(' · ');
-    els.sourceBadge.classList.toggle('is-live', isEastmoney && state.validForAuction && isToday);
-    els.sourceBadge.classList.toggle('is-stale', isEastmoney && (!state.validForAuction || !isToday));
+    els.sourceBadge.classList.toggle('is-live', isLive);
+    els.sourceBadge.classList.toggle('is-stale', isFeed && !isLive);
   }
 
   function updateAutoBadge() {
@@ -432,6 +435,7 @@
     const q = state.search.trim().toLowerCase();
     const out = state.stocks.filter(s => {
       if (state.watchOnly && !state.watchlist.includes(s.code)) return false;
+      if (state.sectors.length && !state.sectors.includes(s.industry)) return false;
       if (q) {
         const hay = (s.code + ' ' + s.name + ' ' + s.industry).toLowerCase();
         if (!hay.includes(q)) return false;
@@ -458,6 +462,22 @@
       const bvv = Number.isFinite(bn) ? bn : -Infinity;
       return (avv - bvv) * sign;
     });
+  }
+
+  function renderSectorChips() {
+    const counts = {};
+    state.stocks.forEach(s => {
+      counts[s.industry] = (counts[s.industry] || 0) + 1;
+    });
+    const sectors = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+    const active = state.sectors;
+    const allActive = active.length === 0;
+    els.sectorChips.innerHTML = `
+      <button class="chip ${allActive ? 'is-active' : ''}" data-sector="" type="button">全部</button>
+      ${sectors.map(sector => `
+        <button class="chip ${active.includes(sector) ? 'is-active' : ''}" data-sector="${esc(sector)}" type="button">${esc(sector)} ${counts[sector]}</button>
+      `).join('')}
+    `;
   }
 
   function renderTable() {
@@ -617,6 +637,7 @@
     renderMarket();
     renderStats();
     renderTop10();
+    renderSectorChips();
     renderTable();
     renderDetail();
     refreshIcons();
@@ -656,7 +677,7 @@
   function loadSnapshot(data) {
     state.stocks = (data.stocks || []).map(normalizeStock);
     state.market = data.market || demoMarket(state.stocks);
-    state.source = data.source || '东方财富';
+    state.source = data.source || '腾讯';
     state.auto = !!data.auto;
     state.lastUpdate = data.fetchedAt || data.date || '';
     state.validForAuction = isAuctionSnapshot(data);
@@ -695,15 +716,18 @@
     btn.disabled = true;
     label.textContent = '抓取中…';
     try {
+      // 手动抓取：点一次只发一次请求，服务端任意时间允许
       const res = await fetch('/api/refresh');
       let data = null;
       try { data = await res.json(); } catch (e) { data = null; }
       if (!data || !data.ok) throw new Error((data && data.error) || '抓取失败');
       loadSnapshot(data);
-      toast(`已抓取 ${data.stocks.length} 只，快照时间 ${data.fetchedAt}`);
+      toast(data.validForAuction
+        ? `已抓取 ${data.stocks.length} 只，快照时间 ${data.fetchedAt}`
+        : `已抓取 ${data.stocks.length} 只（非竞价窗口，仅预览、未保存，保留 9:25 有效数据）`);
     } catch (err) {
       const msg = String(err.message || err);
-      toast(/Failed to fetch|fetch/i.test(msg) ? '无法连接本地服务：请先运行 python server.py' : msg);
+      toast(/Failed to fetch|fetch/i.test(msg) ? '无法连接本地服务：请先运行 python backend/server.py' : msg);
     } finally {
       btn.disabled = false;
       label.textContent = '抓取竞价数据';
@@ -727,6 +751,7 @@
     els.searchInput.value = '';
     state.watchOnly = false;
     els.watchOnly.checked = false;
+    state.sectors = [];
     if (render) renderAll();
   }
 
@@ -943,6 +968,20 @@
     });
     els.btnTemplate.addEventListener('click', downloadTemplate);
     els.btnExport.addEventListener('click', exportResults);
+    els.sectorChips.addEventListener('click', e => {
+      const btn = e.target.closest('.chip');
+      if (!btn) return;
+      const sector = btn.getAttribute('data-sector');
+      if (sector === '') state.sectors = [];
+      else {
+        const idx = state.sectors.indexOf(sector);
+        if (idx >= 0) state.sectors.splice(idx, 1);
+        else state.sectors.push(sector);
+      }
+      renderSectorChips();
+      renderTable();
+      renderStats();
+    });
 
 
 
