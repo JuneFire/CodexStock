@@ -85,5 +85,41 @@ class TestInAuctionWindow(unittest.TestCase):
         self.assertFalse(server._in_auction_window(self._dt(8, 1000)))
 
 
+class TestParsePaging(unittest.TestCase):
+    def test_defaults(self):
+        self.assertEqual(server._parse_paging({}), (1, 30))
+
+    def test_values(self):
+        self.assertEqual(server._parse_paging({"page": ["2"], "page_size": ["10"]}), (2, 10))
+
+    def test_invalid(self):
+        self.assertEqual(server._parse_paging({"page": ["abc"], "page_size": ["0"]}), (1, 1))
+
+    def test_clamp_negative(self):
+        self.assertEqual(server._parse_paging({"page": ["-5"], "page_size": ["100"]}), (1, 100))
+
+
+class TestBuildHorsesForDate(unittest.TestCase):
+    def test_reads_horses_from_db(self):
+        row = {"horses": {"headHorses": [{"code": "new_swzz", "name": "生物制药", "changePct": 2.06}],
+                          "darkHorses": [{"code": "new_dqhy", "name": "电器行业", "changePct": 2.96}]},
+               "fetchedAt": "2026-08-11 15:05:00"}
+        import unittest.mock as mock
+        with mock.patch.object(server.db, "read_review", return_value=row):
+            result = server.build_horses_for_date("2026-08-11")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["date"], "2026-08-11")
+        self.assertEqual(result["headHorses"][0]["name"], "生物制药")
+        self.assertFalse(result.get("stale"))
+
+    def test_no_db_horses_falls_back_to_current(self):
+        import unittest.mock as mock
+        with mock.patch.object(server.db, "read_review", return_value=None), \
+             mock.patch.object(server, "build_horses", return_value={"ok": True, "date": "", "builtAt": "", "headHorses": [], "darkHorses": []}):
+            result = server.build_horses_for_date("2026-08-10")
+        self.assertEqual(result["date"], "2026-08-10")
+        self.assertTrue(result["stale"])
+
+
 if __name__ == "__main__":
     unittest.main()

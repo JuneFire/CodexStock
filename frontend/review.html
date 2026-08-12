@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>情绪周期复盘 · 量化选股器</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="review.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <a class="btn btn-ghost btn-sm" href="index.html" id="btnBack" type="button">
+          <i data-lucide="arrow-left" aria-hidden="true"></i><span>返回</span>
+        </a>
+        <span class="brand-mark"><i data-lucide="clipboard-list" aria-hidden="true"></i></span>
+        <div class="brand-text">
+          <h1>情绪周期复盘</h1>
+          <p id="reviewStatus">—</p>
+        </div>
+      </div>
+      <div class="topbar-tools">
+        <button id="btnPrevDay" class="btn btn-ghost" type="button" data-tooltip="前一天"><i data-lucide="chevron-left" aria-hidden="true"></i></button>
+        <span id="reviewDate" class="panel-meta">—</span>
+        <button id="btnNextDay" class="btn btn-ghost" type="button" data-tooltip="后一天"><i data-lucide="chevron-right" aria-hidden="true"></i></button>
+        <button id="btnFetch" class="btn btn-primary" type="button" data-tooltip="收盘后抓取当日涨停/连板/情绪数据">
+          <i data-lucide="radar" aria-hidden="true"></i><span>收盘复盘</span>
+        </button>
+        <button id="btnSave" class="btn" type="button" data-tooltip="保存手动填写的内容">
+          <i data-lucide="save" aria-hidden="true"></i><span>保存</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="layout review-layout" id="reviewLayout">
+      <aside class="sidebar review-sidebar">
+        <section class="panel horses-panel">
+          <div class="panel-head">
+            <h2>历史复盘</h2>
+            <span id="historyCount" class="panel-meta">—</span>
+          </div>
+          <div id="reviewDateList" class="date-list"></div>
+        </section>
+        <section class="panel horses-panel">
+          <div class="panel-head">
+            <h2>头等马</h2>
+            <span id="headMeta" class="panel-meta">站上60日线 · OBV强</span>
+          </div>
+          <div id="headList" class="horse-list">
+            <div class="horse-empty">加载中…</div>
+          </div>
+        </section>
+        <section class="panel horses-panel">
+          <div class="panel-head">
+            <h2>黑马</h2>
+            <span id="darkMeta" class="panel-meta">未站上60日线 · OBV强</span>
+          </div>
+          <div id="darkList" class="horse-list">
+            <div class="horse-empty">加载中…</div>
+          </div>
+        </section>
+      </aside>
+
+      <main class="main review-main">
+
+        <!-- 1. 指数复盘区 -->
+        <section class="panel review-section">
+          <div class="panel-head"><h2>指数复盘</h2><span id="idxMeta" class="panel-meta">—</span></div>
+          <div class="stats" id="idxStats"></div>
+          <div class="kv-grid">
+            <label class="kv">今日开盘点位<input class="field" data-manual-key="indicesOutlook.openPoint" type="text"></label>
+            <label class="kv">上证压力位<input class="field" data-manual-key="indicesOutlook.press" type="text"></label>
+            <label class="kv">上证支撑位<input class="field" data-manual-key="indicesOutlook.support" type="text"></label>
+            <label class="kv">日K走势及预期<input class="field" data-manual-key="indicesOutlook.dailyK" type="text"></label>
+            <label class="kv">周K走势及预期<input class="field" data-manual-key="indicesOutlook.weeklyK" type="text"></label>
+            <label class="kv kv-wide">上证走势及预期<textarea class="field" data-manual-key="indicesOutlook.outlook" rows="2"></textarea></label>
+          </div>
+        </section>
+
+        <!-- 2. 情绪与竞价区 -->
+        <section class="panel review-section">
+          <div class="panel-head"><h2>情绪与竞价</h2></div>
+          <div class="table-responsive">
+            <table class="table review-table" id="auctionTable">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>最大封单个股及题材</th>
+                  <th>多头/空头风标/市场情绪</th>
+                  <th>封单亿元以上</th>
+                  <th>前排题材</th>
+                  <th>竞价三一票</th>
+                </tr>
+              </thead>
+              <tbody id="auctionBody"></tbody>
+            </table>
+          </div>
+          <div class="kv-grid kv-grid-3">
+            <label class="kv">一字强度/昨<input class="field" data-manual-key="closeStats.yizi" type="text"></label>
+            <label class="kv">涨停/昨<input class="field" data-manual-key="closeStats.zt" type="text"></label>
+            <label class="kv">跌停/昨<input class="field" data-manual-key="closeStats.dt" type="text"></label>
+            <label class="kv">炸板/昨<input class="field" data-manual-key="closeStats.zb" type="text"></label>
+            <label class="kv">红盘/昨<input class="field" data-manual-key="closeStats.red" type="text"></label>
+            <label class="kv">绿盘/昨<input class="field" data-manual-key="closeStats.green" type="text"></label>
+            <label class="kv">连板溢价/昨<input class="field" data-manual-key="closeStats.lbPremium" type="text"></label>
+            <label class="kv">昨涨停溢价/昨<input class="field" data-manual-key="closeStats.ztPremium" type="text"></label>
+            <label class="kv">其他<input class="field" data-manual-key="closeStats.other" type="text"></label>
+          </div>
+          <div class="kv-stack">
+            <label class="kv-block-field">今日情绪<textarea class="field auto-grow" data-manual-key="emotion.today" rows="2"></textarea></label>
+            <label class="kv-block-field">次日风标<textarea class="field auto-grow" data-manual-key="emotion.nextWind" rows="2"></textarea></label>
+            <label class="kv-block-field">风标修正<textarea class="field auto-grow" data-manual-key="emotion.windFix" rows="2"></textarea></label>
+          </div>
+        </section>
+
+        <!-- 3. 题材与消息区 -->
+        <section class="panel review-section">
+          <div class="panel-head"><h2>题材与消息</h2></div>
+          <div class="table-responsive">
+            <table class="table review-table" id="sectorTable">
+              <thead>
+                <tr><th>题材</th><th>当前点位</th><th>压力值</th><th>支撑位</th><th>走势/异动/预期</th></tr>
+              </thead>
+              <tbody id="sectorBody"></tbody>
+            </table>
+          </div>
+          <label class="kv kv-block">重点消息<textarea class="field" data-manual-key="news" rows="3"></textarea></label>
+        </section>
+
+        <!-- 4. 个股连板梯队区 -->
+        <section class="panel review-section">
+          <div class="panel-head"><h2>连板梯队</h2><span id="tierMeta" class="panel-meta">—</span></div>
+          <div class="table-responsive">
+            <table class="table review-table" id="tierTable">
+              <thead>
+                <tr><th>档位</th><th>股票</th><th>题材</th><th>预案</th></tr>
+              </thead>
+              <tbody id="tierBody"></tbody>
+            </table>
+          </div>
+          <div class="panel-head sub"><h3>当天最好机会</h3></div>
+          <div class="kv-grid kv-grid-3">
+            <label class="kv">股票<input class="field" data-manual-key="bestChance.stock" type="text"></label>
+            <label class="kv">题材<input class="field" data-manual-key="bestChance.sector" type="text"></label>
+            <label class="kv">买入位置%<input class="field" data-manual-key="bestChance.buyPct" type="text"></label>
+            <label class="kv">当日溢价%<input class="field" data-manual-key="bestChance.premium" type="text"></label>
+            <label class="kv kv-wide">买入逻辑或模式<textarea class="field" data-manual-key="bestChance.logic" rows="2"></textarea></label>
+            <label class="kv kv-wide">有无介入及原因<textarea class="field" data-manual-key="bestChance.note" rows="2"></textarea></label>
+          </div>
+          <label class="kv kv-block">当天临时介入<textarea class="field" data-manual-key="tempTrade" rows="2"></textarea></label>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

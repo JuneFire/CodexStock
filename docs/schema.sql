@@ -77,3 +77,37 @@ CREATE TABLE IF NOT EXISTS auction_stock (
 --   JOIN auction_day d ON d.id = s.day_id
 --   WHERE s.code = '600000'
 --   ORDER BY d.trade_date DESC;
+
+-- ---------------------------------------------------------------------
+-- 竞价封单额：每行 = 日期 + 代码 + 时点 + 买一/卖一档位 + 封单额(元)
+-- 窄表设计，唯一键 (trade_date, code, sample_time)，upsert 覆盖。
+-- 封单额 = 买一量(手) × 100 × 买一价，竞价阶段买一即涨停委托。
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS auction_seal (
+  id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+  trade_date      DATE          NOT NULL COMMENT '交易日',
+  code            VARCHAR(10)   NOT NULL COMMENT '股票代码',
+  name            VARCHAR(64)   NOT NULL DEFAULT '' COMMENT '股票名称',
+  sample_time     CHAR(5)       NOT NULL COMMENT '抓取时点 09:15/09:20/09:25',
+  bid1_price      DECIMAL(12,3) NULL COMMENT '买一价（元）',
+  bid1_volume     DECIMAL(20,2) NULL COMMENT '买一量（手）',
+  ask1_price      DECIMAL(12,3) NULL COMMENT '卖一价（元）',
+  ask1_volume     DECIMAL(20,2) NULL COMMENT '卖一量（手）',
+  last_price      DECIMAL(12,3) NULL COMMENT '现价（元）',
+  prev_close      DECIMAL(12,3) NULL COMMENT '昨收（元）',
+  seal_amount     DECIMAL(20,2) NULL COMMENT '封单额（元）=买一量(手)×100×买一价',
+  seal_rank       INT           NULL COMMENT '当日该时点封单额排名',
+  fetched_at      DATETIME      NOT NULL COMMENT '本次抓取时间',
+  created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  UNIQUE KEY uq_date_code_time (trade_date, code, sample_time),
+  KEY idx_date_time (trade_date, sample_time),
+  KEY idx_date_seal (trade_date, seal_amount),
+  KEY idx_code (code)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '竞价封单额全市场Top20';
+
+-- 封单额 Top20 查询示例（某日某时点）：
+--   SELECT code, name, seal_amount, seal_rank
+--   FROM auction_seal
+--   WHERE trade_date = '2026-08-10' AND sample_time = '09:25'
+--   ORDER BY seal_amount DESC;

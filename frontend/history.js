@@ -15,6 +15,9 @@
     emptyState: $('#emptyState'),
     detailPanel: $('#detailPanel'),
     detailContent: $('#detailContent'),
+    btnPagePrev: $('#btnPagePrev'),
+    btnPageNext: $('#btnPageNext'),
+    pageInfo: $('#pageInfo'),
     toast: $('#toast')
   };
 
@@ -23,7 +26,11 @@
     currentDate: '',
     day: null,
     selectedCode: null,
-    stockRows: []
+    stockRows: [],
+    page: 1,
+    pageSize: 30,
+    total: 0,
+    hasMore: false
   };
 
   function esc(s) {
@@ -77,12 +84,19 @@
     }
   }
 
-  async function loadDates() {
+  async function loadDates(page) {
+    const p = Math.max(page || 1, 1);
     try {
-      const res = await fetch('/api/history/dates');
+      const res = await fetch('/api/history/dates?page=' + p + '&page_size=' + state.pageSize);
       let data = null;
       try { data = await res.json(); } catch (e) { data = null; }
       if (!data || !data.ok) {
+        state.dates = [];
+        state.total = 0;
+        state.hasMore = false;
+        state.page = 1;
+        state.currentDate = '';
+        renderPager();
         els.historyStatus.textContent = 'MySQL 未连接';
         els.historyStatus.classList.add('is-stale');
         els.dateList.innerHTML = '<div class="date-empty">数据库未连接，无法读取历史数据</div>';
@@ -90,22 +104,43 @@
         return;
       }
       state.dates = data.dates || [];
+      state.total = data.total || 0;
+      state.hasMore = !!data.has_more;
+      state.page = data.page || p;
+      state.pageSize = data.page_size || state.pageSize;
       els.historyStatus.textContent = 'MySQL 已连接';
       els.historyStatus.classList.remove('is-stale');
-      els.dateCount.textContent = String(state.dates.length);
+      els.dateCount.textContent = state.total ? '共 ' + state.total + ' 天' : '0';
       renderDates();
-      if (state.dates.length) {
+      renderPager();
+      if (state.dates.some(d => d.date === state.currentDate)) {
+        renderDates();
+      } else if (state.dates.length) {
         await selectDate(state.dates[0].date);
       } else {
+        state.currentDate = '';
         els.dayStats.innerHTML = '';
         els.stockBody.innerHTML = '';
         els.resultCount.textContent = '0 / 0';
       }
     } catch (err) {
+      state.dates = [];
+      state.total = 0;
+      state.hasMore = false;
+      state.page = 1;
+      state.currentDate = '';
+      renderPager();
       els.historyStatus.textContent = 'MySQL 未连接';
       els.historyStatus.classList.add('is-stale');
       els.dateList.innerHTML = '<div class="date-empty">数据库未连接，无法读取历史数据</div>';
     }
+  }
+
+  function renderPager() {
+    const totalPages = state.total > 0 ? Math.ceil(state.total / state.pageSize) : 0;
+    els.btnPagePrev.disabled = state.page <= 1;
+    els.btnPageNext.disabled = !state.hasMore;
+    els.pageInfo.textContent = state.total > 0 ? state.page + ' / ' + totalPages : '—';
   }
 
   function renderDates() {
@@ -186,12 +221,12 @@
         <td><span class="stock-name">${esc(s.name)}</span><span class="stock-sector">${esc(s.industry)}</span></td>
         <td class="num">${fmtNum(s.price, 2)}</td>
         <td class="num ${colorCls(s.changePct)}">${fmtPct(s.changePct)}</td>
+        <td class="num ${s.closePct != null ? colorCls(s.closePct) : ''}">${s.closePct != null ? fmtPct(s.closePct) : '—'}</td>
         <td class="num col-amount">${fmtAmountYuan(s.auctionAmount)}</td>
         <td class="num col-yamount">${fmtAmountYuan(s.yesterdayAmount)}</td>
         <td class="num col-ratio ${colorCls((s.ratioToYesterday || 0) - 10)}">${fmtNum(s.ratioToYesterday, 1)}%</td>
         <td class="num col-strength">${fmtNum(s.amountStrength, 1)}</td>
         <td class="num col-auctionTurnover">${fmtNum(s.auctionTurnover, 2)}%</td>
-        <td class="num col-vol">${fmtNum(s.volumeRatio, 2)}</td>
         <td class="num col-market">${fmtYi(s.floatCap)}</td>
         <td class="num">${fmtNum(s.score, 1)}</td>
         <td><div class="tag-group">${(s.tags || []).slice(0, 2).map(t => `<span class="tag tag">${esc(t)}</span>`).join('')}</div></td>
@@ -240,7 +275,8 @@
               <tr>
                 <th>日期</th>
                 <th>竞价价</th>
-                <th>涨幅</th>
+                <th>竞价涨幅</th>
+                <th>收盘涨幅</th>
                 <th>竞价金额</th>
                 <th>占比</th>
                 <th>分数</th>
@@ -253,12 +289,13 @@
                   <td>${esc(r.date)}</td>
                   <td class="num">${fmtNum(r.price, 2)}</td>
                   <td class="num ${colorCls(r.changePct)}">${fmtPct(r.changePct)}</td>
+                  <td class="num ${r.closePct != null ? colorCls(r.closePct) : ''}">${r.closePct != null ? fmtPct(r.closePct) : '—'}</td>
                   <td class="num">${fmtAmountYuan(r.auctionAmount)}</td>
                   <td class="num">${fmtNum(r.ratioToYesterday, 1)}%</td>
                   <td class="num">${fmtNum(r.score, 1)}</td>
                   <td class="num">${r.rank == null ? '—' : r.rank}</td>
                 </tr>
-              `).join('') || '<tr><td colspan="7" class="muted">暂无历史记录</td></tr>'}
+              `).join('') || '<tr><td colspan="8" class="muted">暂无历史记录</td></tr>'}
             </tbody>
           </table>
         </div>
@@ -301,6 +338,8 @@
   function bindEvents() {
     els.btnBack.addEventListener('click', () => { location.href = 'index.html'; });
     els.btnExport.addEventListener('click', exportCsv);
+    els.btnPagePrev.addEventListener('click', () => { if (state.page > 1) loadDates(state.page - 1); });
+    els.btnPageNext.addEventListener('click', () => { if (state.hasMore) loadDates(state.page + 1); });
     els.dateList.addEventListener('click', e => {
       const btn = e.target.closest('.date-item');
       if (btn) selectDate(btn.getAttribute('data-date'));
@@ -328,7 +367,7 @@
 
   function init() {
     bindEvents();
-    loadDates();
+    loadDates(1);
     refreshIcons();
   }
 

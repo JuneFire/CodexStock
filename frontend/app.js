@@ -45,6 +45,20 @@
     return 'flat';
   }
 
+  // 强度分级着色：>=high 用 hot，>=mid 用 mid，否则默认
+  function levelCls(v, high, mid) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '';
+    if (n >= high) return 'lvl-hot';
+    if (n >= mid) return 'lvl-mid';
+    return '';
+  }
+
+  // 当前涨幅：红涨绿跌（与竞价涨幅一致）
+  function rtCls(v) {
+    return colorCls(v);
+  }
+
   function mulberry32(seed) {
     let a = seed >>> 0;
     return function () {
@@ -115,6 +129,13 @@
     s.score = scoreOf(s);
     s.tags = tagsOf(s);
     return s;
+  }
+
+  // 竞价抢筹：大幅放量（占昨≥200%）+ 高金额强度（≥30bp）+ 高开（≥3%）三者同存
+  function isGrab(s) {
+    return (Number(s.ratioToYesterday) || 0) >= 200 &&
+      (Number(s.amountStrength) || 0) >= 30 &&
+      (Number(s.changePct) || 0) >= 3;
   }
   // ---------- 演示数据 ----------
   const SECTOR_DEFS = [
@@ -259,8 +280,12 @@
     search: '',
     sectors: [],
     watchOnly: false,
+    top60Only: true,
     watchlist: loadWatchlist(),
     sort: { key: 'score', dir: 'desc' },
+    realtime: {},        // code -> 当前涨幅%
+    realtimeTime: '',
+    realtimeTimer: null,
   };
 
   // ---------- DOM 引用 ----------
@@ -284,6 +309,7 @@
     topList: $('#topList'),
     searchInput: $('#searchInput'),
     watchOnly: $('#watchOnly'),
+    top60Only: $('#top60Only'),
     resultCount: $('#resultCount'),
     stockBody: $('#stockBody'),
     emptyState: $('#emptyState'),
@@ -395,9 +421,10 @@
     }
     els.topList.innerHTML = top.map((s, idx) => {
       const rankCls = idx === 0 ? 'r1' : idx === 1 ? 'r2' : idx === 2 ? 'r3' : '';
+      const tierCls = idx === 0 ? ' rank-1' : idx === 1 ? ' rank-2' : idx === 2 ? ' rank-3' : '';
       const isSel = s.code === state.selectedCode;
       return `
-        <div class="top-row ${isSel ? 'is-selected' : ''}" data-code="${esc(s.code)}" role="button" tabindex="0">
+        <div class="top-row${tierCls} ${isSel ? 'is-selected' : ''}" data-code="${esc(s.code)}" role="button" tabindex="0">
           <span class="top-rank ${rankCls}">${idx + 1}</span>
           <div class="top-identity">
             <div class="top-name"><span>${esc(s.name)}</span><span class="stock-code">${esc(s.code)}</span></div>
@@ -445,6 +472,11 @@
     return sortStocks(out);
   }
 
+  function top60Limit(list) {
+    if (!state.top60Only) return list;
+    return list.slice(0, 60);
+  }
+
   function sortStocks(list) {
     const { key, dir } = state.sort;
     const sign = dir === 'desc' ? -1 : 1;
@@ -481,8 +513,10 @@
   }
 
   function renderTable() {
-    const rows = getFiltered();
-    els.resultCount.textContent = `${rows.length} / ${state.stocks.length}`;
+    const allRows = getFiltered();
+    const rows = top60Limit(allRows);
+    const total = state.top60Only ? Math.min(allRows.length, 60) : allRows.length;
+    els.resultCount.textContent = `${total} / ${state.stocks.length}`;
     els.emptyState.hidden = rows.length > 0;
     if (!rows.length) {
       els.stockBody.innerHTML = '';
@@ -493,9 +527,10 @@
     els.stockBody.innerHTML = rows.map(s => {
       const watched = state.watchlist.includes(s.code);
       const selected = s.code === state.selectedCode;
+      const grab = isGrab(s);
       const tags = (s.tags || []).slice(0, 2);
       return `
-        <tr class="${selected ? 'is-selected' : ''}" data-code="${esc(s.code)}">
+        <tr class="${selected ? 'is-selected' : ''}${grab ? ' is-grab' : ''}" data-code="${esc(s.code)}">
           <td>
             <button class="star-btn ${watched ? 'is-active' : ''}" data-action="watch" data-code="${esc(s.code)}" aria-label="${watched ? '取消自选' : '加入自选'}">
               <i data-lucide="star" aria-hidden="true"></i>
@@ -503,22 +538,22 @@
           </td>
           <td class="stock-code">${esc(s.code)}</td>
           <td>
-            <span class="stock-name">${esc(s.name)}</span>
+            <span class="stock-name">${esc(s.name)}${grab ? '<span class="grab-badge" title="竞价抢筹">抢筹</span>' : ''}</span>
             <span class="stock-sector">${esc(s.industry)}</span>
           </td>
           <td class="num">${fmtNum(s.price, 2)}</td>
           <td class="num ${colorCls(s.changePct)}">${fmtPct(s.changePct)}</td>
-          <td class="num col-amount">${fmtAmountYuan(s.auctionAmount)}</td>
-          <td class="num col-yamount">${fmtAmountYuan(s.yesterdayAmount)}</td>
+          <td class="num col-realtime ${rtCls(state.realtime[s.code])}">${state.realtime[s.code] != null ? fmtPct(state.realtime[s.code]) : '—'}</td>
+          <td class="num col-amount amount-strong">${fmtAmountYuan(s.auctionAmount)}</td>
+          <td class="num col-yamount amount-dim">${fmtAmountYuan(s.yesterdayAmount)}</td>
           <td class="num col-ratio ${colorCls((s.ratioToYesterday || 0) - 10)}">${fmtNum(s.ratioToYesterday, 1)}%</td>
-          <td class="num col-strength">${fmtNum(s.amountStrength, 1)}</td>
-          <td class="num col-auctionTurnover">${fmtNum(s.auctionTurnover, 2)}%</td>
-          <td class="num col-vol">${fmtNum(s.volumeRatio, 2)}</td>
+          <td class="num col-strength ${levelCls(s.amountStrength, 100, 30)}">${fmtNum(s.amountStrength, 1)}</td>
+          <td class="num col-auctionTurnover ${levelCls(s.auctionTurnover, 1.5, 0.8)}">${fmtNum(s.auctionTurnover, 2)}%</td>
           <td class="num col-market">${fmtYi(s.floatCap)}</td>
           <td>
             <div class="score-cell">
               <span class="score-track"><span class="score-fill ${s.score >= 80 ? 'high' : ''}" style="width:${clamp(s.score || 0, 0, 100)}%"></span></span>
-              <span class="num">${fmtNum(s.score, 1)}</span>
+              <span class="num ${levelCls(s.score, 80, 60)}">${fmtNum(s.score, 1)}</span>
             </div>
           </td>
           <td>
@@ -558,8 +593,7 @@
       ['昨日成交额', fmtAmountYuan(s.yesterdayAmount)],
       ['竞价占昨日', fmtNum(s.ratioToYesterday, 1) + '%'],
       ['金额强度', fmtNum(s.amountStrength, 1) + ' bp'],
-      ['竞价换手', fmtNum(s.auctionTurnover, 2) + '%'],
-      ['量比', fmtNum(s.volumeRatio, 2)]
+      ['竞价换手', fmtNum(s.auctionTurnover, 2) + '%']
     ];
     els.detailContent.innerHTML = `
       <div class="detail-card">
@@ -682,8 +716,10 @@
     state.lastUpdate = data.fetchedAt || data.date || '';
     state.validForAuction = isAuctionSnapshot(data);
     state.selectedCode = null;
+    state.realtime = {};
     resetFilters(false);
     renderAll();
+    startRealtimePolling();
   }
 
   function setDemoData() {
@@ -694,6 +730,8 @@
     state.validForAuction = true;
     state.lastUpdate = new Date().toLocaleString('zh-CN', { hour12: false });
     state.selectedCode = null;
+    clearInterval(state.realtimeTimer);
+    state.realtime = {};
     resetFilters(false);
     renderAll();
   }
@@ -745,6 +783,29 @@
       }
     } catch (e) { /* 静态打开时保持演示数据 */ }
   }
+
+  // ---------- 当前涨幅（盘中实时） ----------
+  async function refreshRealtime() {
+    try {
+      const res = await fetch('/api/realtime');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.ok && data.realtime) {
+        state.realtime = data.realtime;
+        state.realtimeTime = data.fetchedAt || '';
+        renderTable();
+      }
+    } catch (e) { /* 实时接口失败时保留上一帧 */ }
+  }
+
+  function startRealtimePolling() {
+    // 仅对真实行情数据开启盘中实时轮询（演示/导入数据无意义）
+    if (state.source === '演示数据' || state.source === '导入CSV') return;
+    clearInterval(state.realtimeTimer);
+    refreshRealtime();
+    state.realtimeTimer = setInterval(refreshRealtime, 30000);
+  }
+
   // ---------- 筛选交互 ----------
   function resetFilters(render = true) {
     state.search = '';
@@ -765,7 +826,7 @@
   }
 
   // ---------- CSV 导入导出 ----------
-  const CSV_HEADERS = ['代码', '名称', '板块', '竞价价', '竞价涨幅', '竞价金额(元)', '竞价量(手)', '竞价换手(%)', '量比', '流通市值(元)', '昨日成交额(元)', '昨日占比(%)', '金额强度(bp)', '超预期分', '状态'];
+  const CSV_HEADERS = ['代码', '名称', '板块', '竞价价', '竞价涨幅', '竞价金额(元)', '竞价量(手)', '竞价换手(%)', '流通市值(元)', '昨日成交额(元)', '昨日占比(%)', '金额强度(bp)', '超预期分', '状态'];
 
   function normalizeKey(s) {
     return String(s).toLowerCase().replace(/[\s（）()%％]/g, '');
@@ -905,11 +966,11 @@
     };
     const row = [
       sample.code, sample.name, sample.industry, sample.price, sample.changePct,
-      sample.auctionAmount, sample.auctionVolume, sample.auctionTurnover, sample.volumeRatio,
+      sample.auctionAmount, sample.auctionVolume, sample.auctionTurnover,
       sample.floatCap, sample.yesterdayAmount, sample.ratioToYesterday, sample.amountStrength,
       sample.score, (sample.tags || []).join('|')
     ].join(',');
-    downloadCSV('竞价选股器模板.csv', CSV_HEADERS.join(',') + '\n' + row);
+    downloadCSV('量化选股器模板.csv', CSV_HEADERS.join(',') + '\n' + row);
     toast('模板已下载');
   }
 
@@ -940,7 +1001,7 @@
     }
     const lines = rows.map(s => [
       s.code, s.name, s.industry, s.price, s.changePct,
-      s.auctionAmount, s.auctionVolume, s.auctionTurnover, s.volumeRatio,
+      s.auctionAmount, s.auctionVolume, s.auctionTurnover,
       s.floatCap, s.yesterdayAmount, s.ratioToYesterday, s.amountStrength,
       s.score, (s.tags || []).join('|')
     ].join(','));
@@ -997,6 +1058,11 @@
       state.watchOnly = els.watchOnly.checked;
       renderTable();
       renderStats();
+    });
+
+    els.top60Only.addEventListener('change', () => {
+      state.top60Only = els.top60Only.checked;
+      renderTable();
     });
 
     const thead = $('thead', $('#stockTable'));

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>竞价选股器</title>
+  <title>量化选股器</title>
   <link rel="stylesheet" href="styles.css">
   <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <script defer src="app.js"></script>
@@ -14,7 +14,7 @@
       <div class="brand">
         <span class="brand-mark"><i data-lucide="candlestick-chart" aria-hidden="true"></i></span>
         <div class="brand-text">
-          <h1>竞价选股器</h1>
+          <h1>量化选股器</h1>
           <p id="marketPhase">—</p>
         </div>
       </div>
@@ -37,6 +37,12 @@
         <button id="btnExport" class="btn btn-ghost" type="button" data-tooltip="导出当前结果">
           <i data-lucide="download" aria-hidden="true"></i><span>导出结果</span>
         </button>
+        <a class="btn" href="history.html" data-tooltip="查看 MySQL 历史竞价数据">
+          <i data-lucide="history" aria-hidden="true"></i><span>历史</span>
+        </a>
+        <a class="btn" href="review.html" data-tooltip="每日情绪周期复盘">
+          <i data-lucide="clipboard-list" aria-hidden="true"></i><span>复盘</span>
+        </a>
         <input id="fileInput" type="file" accept=".csv,.txt" hidden>
       </div>
     </header>
@@ -80,6 +86,10 @@
             </div>
             <div class="table-actions">
               <label class="check-label">
+                <input id="top60Only" type="checkbox" checked>
+                <span>只看前60</span>
+              </label>
+              <label class="check-label">
                 <input id="watchOnly" type="checkbox">
                 <span>只看自选</span>
               </label>
@@ -95,12 +105,12 @@
                   <th class="sortable" data-key="name">名称 / 板块</th>
                   <th class="sortable" data-key="price">竞价价</th>
                   <th class="sortable" data-key="changePct">竞价涨幅</th>
+                  <th class="sortable col-realtime" data-key="currentPct">当前涨幅</th>
                   <th class="sortable" data-key="auctionAmount">竞价金额</th>
                   <th class="sortable col-yamount" data-key="yesterdayAmount">昨日成交额</th>
                   <th class="sortable col-ratio" data-key="ratioToYesterday">竞价占比</th>
                   <th class="sortable col-strength" data-key="amountStrength">金额强度</th>
                   <th class="sortable col-auctionTurnover" data-key="auctionTurnover">竞价换手</th>
-                  <th class="sortable col-vol" data-key="volumeRatio">量比</th>
                   <th class="sortable col-market" data-key="floatCap">流通市值</th>
                   <th class="sortable" data-key="score">超预期分</th>
                   <th class="sortable" data-key="tags">状态</th>

@@ -77,12 +77,64 @@ SCHEMA = [
         score DECIMAL(6,2) NULL,
         `rank` INT NULL,
         tags VARCHAR(128) NULL,
+        close_pct DECIMAL(8,3) NULL,
+        close_price DECIMAL(12,3) NULL,
         UNIQUE KEY uq_day_code (day_id, code),
         KEY idx_code (code),
         KEY idx_day_score (day_id, score)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    """
+    CREATE TABLE IF NOT EXISTS sentiment_review (
+        trade_date DATE NOT NULL PRIMARY KEY,
+        indices_json JSON NULL,
+        breadth_json JSON NULL,
+        pools_json JSON NULL,
+        lianban_json JSON NULL,
+        manual_json JSON NULL,
+        horses_json JSON NULL,
+        fetched_at DATETIME NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS auction_seal (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        trade_date DATE NOT NULL,
+        code VARCHAR(10) NOT NULL,
+        name VARCHAR(64) NOT NULL DEFAULT '',
+        sample_time CHAR(5) NOT NULL,
+        bid1_price DECIMAL(12,3) NULL,
+        bid1_volume DECIMAL(20,2) NULL,
+        ask1_price DECIMAL(12,3) NULL,
+        ask1_volume DECIMAL(20,2) NULL,
+        last_price DECIMAL(12,3) NULL,
+        prev_close DECIMAL(12,3) NULL,
+        seal_amount DECIMAL(20,2) NULL,
+        seal_rank INT NULL,
+        fetched_at DATETIME NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_date_code_time (trade_date, code, sample_time),
+        KEY idx_date_time (trade_date, sample_time),
+        KEY idx_date_seal (trade_date, seal_amount)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 ]
+
+REVIEW_UPSERT_SQL = """
+INSERT INTO sentiment_review (trade_date, indices_json, breadth_json, pools_json, lianban_json, manual_json, horses_json, fetched_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+ON DUPLICATE KEY UPDATE
+    indices_json = VALUES(indices_json),
+    breadth_json = VALUES(breadth_json),
+    pools_json = VALUES(pools_json),
+    lianban_json = VALUES(lianban_json),
+    manual_json = VALUES(manual_json),
+    horses_json = VALUES(horses_json),
+    fetched_at = VALUES(fetched_at)
+"""
 
 DAY_UPSERT_SQL = """
 INSERT INTO auction_day (trade_date, fetched_at, source, auto, valid, market_json)
@@ -180,6 +232,17 @@ def ensure_schema():
             with conn.cursor() as cur:
                 for stmt in SCHEMA:
                     cur.execute(stmt)
+                # 旧表补齐新列（部分 MySQL 版本不支持 ADD COLUMN IF NOT EXISTS，用异常容错）
+                for col in ("close_pct DECIMAL(8,3) NULL", "close_price DECIMAL(12,3) NULL",
+                            "horses_json JSON NULL"):
+                    try:
+                        cur.execute("ALTER TABLE auction_stock ADD COLUMN %s" % col)
+                    except Exception:
+                        pass
+                    try:
+                        cur.execute("ALTER TABLE sentiment_review ADD COLUMN %s" % col)
+                    except Exception:
+                        pass
             conn.commit()
         finally:
             conn.close()
@@ -213,12 +276,12 @@ def _num(v):
         return None
 
 
-def _reject_reason(snapshot):
+def _reject_reason(snapshot, allow_anytime=False):
     if not isinstance(snapshot, dict):
         return "快照不是有效对象"
     if not snapshot.get("ok"):
         return "快照 ok 标记为 False"
-    if not snapshot.get("validForAuction"):
+    if not snapshot.get("validForAuction") and not allow_anytime:
         return "快照 validForAuction 不为 true"
     if not snapshot.get("stocks"):
         return "股票列表为空"
@@ -227,6 +290,8 @@ def _reject_reason(snapshot):
     m = re.match(r"(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})", fetched)
     if not m or m.group(1) != date:
         return "fetchedAt 与日期不一致"
+    if allow_anytime:
+        return ""  # 测试模式：放开竞价窗口校验
     hm = int(m.group(2)) * 60 + int(m.group(3))
     if not (9 * 60 + 25 <= hm < 9 * 60 + 30):
         return "抓取时间不在竞价窗口内（9:25-9:30），已拒绝写入"
@@ -261,9 +326,9 @@ def _stock_values(day_id, s):
     )
 
 
-def save_snapshot(snapshot):
+def save_snapshot(snapshot, allow_anytime=False):
     global _available, _last_error
-    reason = _reject_reason(snapshot)
+    reason = _reject_reason(snapshot, allow_anytime=allow_anytime)
     if reason:
         _last_error = reason
         return False
@@ -321,6 +386,20 @@ def _datetime_str(v):
     return str(v)[:19]
 
 
+def _dates_from_rows(rows):
+    return [
+        {
+            "date": _date_str(r["trade_date"]),
+            "fetchedAt": _datetime_str(r["fetched_at"]),
+            "source": r["source"],
+            "auto": bool(r["auto"]),
+            "valid": bool(r["valid"]),
+            "stockCount": int(r["stock_count"] or 0),
+        }
+        for r in rows
+    ]
+
+
 def list_dates(limit=120):
     with _connect() as conn:
         with conn.cursor() as cur:
@@ -337,17 +416,32 @@ def list_dates(limit=120):
                 (limit,),
             )
             rows = cur.fetchall()
-    return [
-        {
-            "date": _date_str(r["trade_date"]),
-            "fetchedAt": _datetime_str(r["fetched_at"]),
-            "source": r["source"],
-            "auto": bool(r["auto"]),
-            "valid": bool(r["valid"]),
-            "stockCount": int(r["stock_count"] or 0),
-        }
-        for r in rows
-    ]
+    return _dates_from_rows(rows)
+
+
+def list_dates_page(page=1, page_size=30):
+    """分页历史日期，按日期倒序。返回 (dates, total)。"""
+    page = max(int(page), 1)
+    page_size = max(int(page_size), 1)
+    offset = (page - 1) * page_size
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS c FROM auction_day")
+            total = int((cur.fetchone() or {}).get("c") or 0)
+            cur.execute(
+                """
+                SELECT d.trade_date, d.fetched_at, d.source, d.auto, d.valid,
+                       COUNT(s.id) AS stock_count
+                FROM auction_day d
+                LEFT JOIN auction_stock s ON s.day_id = d.id
+                GROUP BY d.id, d.trade_date, d.fetched_at, d.source, d.auto, d.valid
+                ORDER BY d.trade_date DESC
+                LIMIT %s OFFSET %s
+                """,
+                (page_size, offset),
+            )
+            rows = cur.fetchall()
+    return _dates_from_rows(rows), total
 
 
 def _stock_from_row(r):
@@ -374,6 +468,8 @@ def _stock_from_row(r):
         "score": _num(r["score"]),
         "rank": r["rank"],
         "tags": r["tags"].split(",") if r["tags"] else [],
+        "closePct": _num(r.get("close_pct")),
+        "closePrice": _num(r.get("close_price")),
     }
 
 
@@ -466,3 +562,265 @@ def export_csv(date):
     if not day:
         return None
     return format_csv(day["date"], day["stocks"])
+
+
+# ---------- 情绪周期复盘 ----------
+
+def _json_dumps(obj):
+    try:
+        return json.dumps(obj, ensure_ascii=False) if obj is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_loads(text):
+    if not text:
+        return None
+    try:
+        value = json.loads(text)
+        if isinstance(value, (dict, list)):
+            return value
+        return None
+    except (TypeError, ValueError):
+        return None
+
+
+def save_review(date, indices=None, breadth=None, pools=None, lianban=None, manual=None, horses=None, fetched_at=None):
+    """保存某日情绪周期复盘（各 JSON 列）。MySQL 不可用返回 False 不抛。"""
+    global _available, _last_error
+    if fetched_at is None:
+        from datetime import datetime
+        fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _lock:
+        try:
+            conn = _connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        REVIEW_UPSERT_SQL,
+                        (
+                            date,
+                            _json_dumps(indices),
+                            _json_dumps(breadth),
+                            _json_dumps(pools),
+                            _json_dumps(lianban),
+                            _json_dumps(manual),
+                            _json_dumps(horses),
+                            fetched_at,
+                        ),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+            _available = True
+            _last_error = ""
+            return True
+        except Exception as exc:
+            _available = False
+            _last_error = str(exc)
+            return False
+
+
+def read_review(date):
+    """读取某日复盘 dict | None。"""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM sentiment_review WHERE trade_date = %s", (date,))
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "date": _date_str(row["trade_date"]),
+        "fetchedAt": _datetime_str(row["fetched_at"]),
+        "indices": _json_loads(row["indices_json"]),
+        "breadth": _json_loads(row["breadth_json"]),
+        "pools": _json_loads(row["pools_json"]),
+        "lianban": _json_loads(row["lianban_json"]),
+        "manual": _json_loads(row["manual_json"]),
+        "horses": _json_loads(row.get("horses_json")),
+    }
+
+
+def list_review_dates(limit=120):
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trade_date, fetched_at FROM sentiment_review ORDER BY trade_date DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return [{"date": _date_str(r["trade_date"]), "fetchedAt": _datetime_str(r["fetched_at"])} for r in rows]
+
+
+# ---------- 竞价封单额 ----------
+
+SEAL_UPSERT_SQL = """
+INSERT INTO auction_seal (
+    trade_date, code, name, sample_time, bid1_price, bid1_volume, ask1_price, ask1_volume,
+    last_price, prev_close, seal_amount, seal_rank, fetched_at
+) VALUES (
+    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+)
+ON DUPLICATE KEY UPDATE
+    name = VALUES(name),
+    bid1_price = VALUES(bid1_price),
+    bid1_volume = VALUES(bid1_volume),
+    ask1_price = VALUES(ask1_price),
+    ask1_volume = VALUES(ask1_volume),
+    last_price = VALUES(last_price),
+    prev_close = VALUES(prev_close),
+    seal_amount = VALUES(seal_amount),
+    seal_rank = VALUES(seal_rank),
+    fetched_at = VALUES(fetched_at)
+"""
+
+
+def _seal_values(r):
+    return (
+        r["tradeDate"],
+        str(r.get("code") or ""),
+        str(r.get("name") or ""),
+        r["sampleTime"],
+        _num(r.get("bid1Price")),
+        _num(r.get("bid1Volume")),
+        _num(r.get("ask1Price")),
+        _num(r.get("ask1Volume")),
+        _num(r.get("lastPrice")),
+        _num(r.get("prevClose")),
+        _num(r.get("sealAmount")),
+        r.get("sealRank"),
+        r.get("fetchedAt"),
+    )
+
+
+def save_seal(records):
+    """批量 upsert 封单记录。MySQL 不可用返回 False 不抛。"""
+    global _available, _last_error
+    if not records:
+        _last_error = "封单记录为空"
+        return False
+    with _lock:
+        try:
+            conn = _connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.executemany(SEAL_UPSERT_SQL, [_seal_values(r) for r in records])
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+            _available = True
+            _last_error = ""
+            return True
+        except Exception as exc:
+            _available = False
+            _last_error = str(exc)
+            return False
+
+
+CLOSE_PCT_SQL = """
+UPDATE auction_stock SET close_pct = %s, close_price = %s
+WHERE day_id = %s AND code = %s
+"""
+
+
+def save_close_pct(date, pct_map):
+    """把 {code: 收盘涨幅%} 批量更新到当日 auction_stock 行。MySQL 不可用返回 False。"""
+    global _available, _last_error
+    if not pct_map:
+        _last_error = "收盘数据为空"
+        return False
+    with _lock:
+        try:
+            conn = _connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM auction_day WHERE trade_date = %s", (date,))
+                    day = cur.fetchone()
+                    if not day:
+                        _last_error = "当日无竞价快照"
+                        return False
+                    day_id = day["id"]
+                    rows = []
+                    for code, pct in pct_map.items():
+                        code = str(code).zfill(6)
+                        pct_val = _num(pct)
+                        if pct_val is None:
+                            continue
+                        rows.append((pct_val, None, day_id, code))
+                    if rows:
+                        cur.executemany(CLOSE_PCT_SQL, rows)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+            _available = True
+            _last_error = ""
+            return True
+        except Exception as exc:
+            _available = False
+            _last_error = str(exc)
+            return False
+
+
+def _seal_from_row(r):
+    return {
+        "code": r["code"],
+        "name": r["name"],
+        "sampleTime": r["sample_time"],
+        "bid1Price": _num(r["bid1_price"]),
+        "bid1Volume": _num(r["bid1_volume"]),
+        "ask1Price": _num(r["ask1_price"]),
+        "ask1Volume": _num(r["ask1_volume"]),
+        "lastPrice": _num(r["last_price"]),
+        "prevClose": _num(r["prev_close"]),
+        "sealAmount": _num(r["seal_amount"]),
+        "sealRank": r["seal_rank"],
+        "fetchedAt": _datetime_str(r["fetched_at"]),
+    }
+
+
+def get_seal(date):
+    """某日全部封单行，按时点、封单额降序排。"""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM auction_seal WHERE trade_date = %s ORDER BY sample_time, seal_amount DESC",
+                (date,),
+            )
+            rows = cur.fetchall()
+    return [_seal_from_row(r) for r in rows]
+
+
+def list_seal_dates(limit=120):
+    """有封单数据的日期列表（含三个时点完成情况）。"""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT trade_date,
+                       COUNT(DISTINCT code) AS pool_count,
+                       GROUP_CONCAT(DISTINCT sample_time ORDER BY sample_time) AS times
+                FROM auction_seal
+                GROUP BY trade_date
+                ORDER BY trade_date DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "date": _date_str(r["trade_date"]),
+            "poolCount": int(r["pool_count"] or 0),
+            "times": (r["times"] or "").split(","),
+        }
+        for r in rows
+    ]

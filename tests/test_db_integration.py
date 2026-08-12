@@ -41,9 +41,20 @@ def cleanup():
             if row:
                 cur.execute("DELETE FROM auction_stock WHERE day_id = %s", (row["id"],))
                 cur.execute("DELETE FROM auction_day WHERE id = %s", (row["id"],))
+            cur.execute("DELETE FROM auction_seal WHERE trade_date = %s", (TEST_DATE,))
         conn.commit()
     finally:
         conn.close()
+
+
+def seal_record():
+    return {
+        "tradeDate": TEST_DATE, "code": TEST_CODE, "name": "集成测试",
+        "sampleTime": "09:15", "bid1Price": 10.0, "bid1Volume": 1000.0,
+        "ask1Price": 10.01, "ask1Volume": 200.0, "lastPrice": 10.0,
+        "prevClose": 9.9, "sealAmount": 1000000.0, "sealRank": 1,
+        "fetchedAt": "2099-01-05 09:15:02",
+    }
 
 
 @unittest.skipUnless(os.environ.get("RUN_DB_TESTS") == "1", "需要 RUN_DB_TESTS=1 且本地 MySQL 可连接")
@@ -66,6 +77,21 @@ class MySqlIntegrationTest(unittest.TestCase):
             csv_text = db.export_csv(TEST_DATE)
             self.assertIsNotNone(csv_text)
             self.assertTrue(csv_text.startswith("日期,代码,名称"))
+        finally:
+            cleanup()
+
+    def test_seal_roundtrip(self):
+        self.assertTrue(db.ensure_schema(), db.last_error())
+        cleanup()
+        try:
+            self.assertTrue(db.save_seal([seal_record()]), db.last_error())
+            rows = db.get_seal(TEST_DATE)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["code"], TEST_CODE)
+            self.assertEqual(rows[0]["sampleTime"], "09:15")
+            self.assertEqual(rows[0]["sealAmount"], 1000000.0)
+            dates = db.list_seal_dates()
+            self.assertTrue(any(d["date"] == TEST_DATE for d in dates))
         finally:
             cleanup()
 

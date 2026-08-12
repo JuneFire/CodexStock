@@ -163,6 +163,10 @@ i[data-lucide] {
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
+a.btn {
+  text-decoration: none;
+}
+
 .btn:hover {
   background: var(--surface-2);
   border-color: var(--text-3);
@@ -528,6 +532,23 @@ input[type="search"] {
   background: var(--accent-bg);
 }
 
+/* 竞价抢筹股：整行暖橙背景 + 左侧强调条 */
+.table tbody tr.is-grab {
+  background: linear-gradient(90deg, rgba(240, 146, 18, 0.14), rgba(240, 146, 18, 0.05) 55%, transparent);
+}
+
+.table tbody tr.is-grab:hover {
+  background: linear-gradient(90deg, rgba(240, 146, 18, 0.2), rgba(240, 146, 18, 0.08) 55%, transparent);
+}
+
+.table tbody tr.is-grab.is-selected {
+  background: linear-gradient(90deg, rgba(240, 146, 18, 0.24), rgba(240, 146, 18, 0.1) 55%, transparent);
+}
+
+.table tbody tr.is-grab .stock-name {
+  color: #c2410c;
+}
+
 .sortable {
   cursor: pointer;
   user-select: none;
@@ -579,6 +600,20 @@ input[type="search"] {
   font-weight: 600;
 }
 
+.grab-badge {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  height: 16px;
+  line-height: 16px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  background: #ea580c;
+  vertical-align: 1px;
+}
+
 .stock-sector {
   display: block;
   font-size: 11px;
@@ -588,6 +623,27 @@ input[type="search"] {
 
 .num {
   font-variant-numeric: tabular-nums;
+}
+
+/* 强度分级着色：高热度橙红 / 中等琥珀 */
+.lvl-hot {
+  color: #ea580c;
+  font-weight: 700;
+}
+
+.lvl-mid {
+  color: #b45309;
+  font-weight: 600;
+}
+
+/* 竞价金额强调 / 昨日成交额弱化 */
+.amount-strong {
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+
+.amount-dim {
+  color: var(--text-3);
 }
 
 .tag {
@@ -912,7 +968,8 @@ input[type="search"] {
   }
 
   .col-market,
-  .col-amount {
+  .col-amount,
+  .col-realtime {
     display: none;
   }
 }
@@ -991,6 +1048,43 @@ input[type="search"] {
 
 .top-row:hover {
   background: var(--surface-2);
+}
+
+/* 排名前三：颜色层级递减 */
+.top-row.rank-1 {
+  background: linear-gradient(90deg, rgba(232, 162, 59, 0.20), rgba(232, 162, 59, 0.06) 60%, transparent);
+}
+
+.top-row.rank-2 {
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.16), rgba(148, 163, 184, 0.05) 60%, transparent);
+}
+
+.top-row.rank-3 {
+  background: linear-gradient(90deg, rgba(217, 154, 108, 0.13), rgba(217, 154, 108, 0.04) 60%, transparent);
+}
+
+.top-row.rank-1:hover {
+  background: linear-gradient(90deg, rgba(232, 162, 59, 0.28), rgba(232, 162, 59, 0.1) 60%, transparent);
+}
+
+.top-row.rank-2:hover {
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.24), rgba(148, 163, 184, 0.08) 60%, transparent);
+}
+
+.top-row.rank-3:hover {
+  background: linear-gradient(90deg, rgba(217, 154, 108, 0.2), rgba(217, 154, 108, 0.07) 60%, transparent);
+}
+
+.top-row.rank-1.is-selected {
+  background: linear-gradient(90deg, rgba(232, 162, 59, 0.32), rgba(232, 162, 59, 0.12) 60%, transparent);
+}
+
+.top-row.rank-2.is-selected {
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.28), rgba(148, 163, 184, 0.1) 60%, transparent);
+}
+
+.top-row.rank-3.is-selected {
+  background: linear-gradient(90deg, rgba(217, 154, 108, 0.24), rgba(217, 154, 108, 0.09) 60%, transparent);
 }
 
 .top-row.is-selected {
@@ -1256,6 +1350,21 @@ input[type="search"] {
   text-align: center;
 }
 
+.date-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.page-info {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
 .btn-link {
   border: 0;
   background: transparent;
@@ -1298,4 +1407,259 @@ input[type="search"] {
   .history-layout.has-detail {
     grid-template-columns: 1fr;
   }
+}
+/* ---------- 情绪周期复盘 ---------- */
+.review-layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 14px;
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 16px;
+  align-items: start;
+}
+
+.review-sidebar {
+  position: sticky;
+  top: 68px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.horses-panel {
+  max-height: 420px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.horse-list {
+  overflow-y: auto;
+  padding: 6px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.horse-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.horse-item:hover {
+  background: var(--surface-2);
+}
+
+.horse-code {
+  color: var(--text-3);
+  font-size: 11px;
+  min-width: 58px;
+  font-variant-numeric: tabular-nums;
+}
+
+.horse-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.horse-pct {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 56px;
+  text-align: right;
+}
+
+.horse-empty {
+  padding: 12px 6px;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+.review-main {
+  width: 100%;
+}
+
+.review-section {
+  margin-bottom: 16px;
+}
+
+.review-section .panel-head.sub {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: 14px;
+}
+
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.kv-grid-3 {
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
+.kv {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.kv-wide {
+  grid-column: span 2;
+}
+
+.kv-block {
+  margin-top: 12px;
+}
+
+/* 情绪与竞价：通栏文字区（今日情绪/次日风标/风标修正） */
+.kv-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.kv-block-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.kv-block-field textarea.field {
+  width: 100%;
+  font-size: 13px;
+  color: var(--text-2);
+  min-height: 100px;
+  resize: vertical;
+  line-height: 1.5;
+  overflow-y: auto;
+}
+
+.kv .field,
+.kv textarea.field {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.field {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 13px;
+  font-family: inherit;
+  transition: color 0.15s ease;
+}
+
+.field:focus {
+  outline: none;
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.review-table input.field {
+  min-width: 120px;
+  padding: 4px 6px;
+}
+
+/* 竞价表多行展示：每行一项，便于扫描；无边框，用背景色区分 */
+.multi-line {
+  min-width: 120px;
+  min-height: 40px;
+  padding: 5px 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  font-variant-numeric: tabular-nums;
+  resize: vertical;
+  overflow-y: auto;
+  white-space: pre;
+  font-family: inherit;
+  border: none;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--accent-strong);
+  outline: none;
+  transition: background 0.15s ease;
+}
+
+.multi-line:focus {
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
+/* 封单亿元以上：结构化展示，名称红暖、封单额中间、题材灰 */
+.seal-cell {
+  vertical-align: top;
+}
+
+.seal-list-box {
+  min-width: 170px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-size: 12px;
+  line-height: 1.9;
+}
+
+.seal-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.seal-name {
+  color: #e0562e;
+  font-weight: 650;
+}
+
+.seal-amount {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.seal-industry {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.seal-rest {
+  color: var(--text-2);
+}
+
+.seal-plain {
+  color: var(--text-2);
+}
+
+.time-cell {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.tier-row.tier-hot .tier-label {
+  color: #d97706;
+  font-weight: 700;
+}
+
+.tier-label {
+  font-weight: 600;
+  white-space: nowrap;
 }

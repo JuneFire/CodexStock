@@ -198,6 +198,41 @@ class QueryTest(unittest.TestCase):
         self.assertEqual(rows[0]["tags"], [])
 
 
+class ListDatesPageTest(unittest.TestCase):
+    def _row(self, day):
+        return {
+            "trade_date": date(2026, 8, day),
+            "fetched_at": datetime(2026, 8, day, 9, 26, 1),
+            "source": "东方财富",
+            "auto": 1,
+            "valid": 1,
+            "stock_count": 200,
+        }
+
+    def test_first_page(self):
+        fake = FakeConn(rows=[{"c": 120}, self._row(10), self._row(9)])
+        with mock.patch.object(db, "_connect", return_value=fake):
+            dates, total = db.list_dates_page(1, 30)
+        self.assertEqual(total, 120)
+        self.assertEqual([d["date"] for d in dates], ["2026-08-10", "2026-08-09"])
+        self.assertEqual(dates[0]["stockCount"], 200)
+        count_sql = fake.cur.executed[0][0].strip().upper()
+        self.assertIn("SELECT COUNT(*)", count_sql)
+        self.assertEqual(fake.cur.executed[1][1], (30, 0))
+
+    def test_second_page_offset(self):
+        fake = FakeConn(rows=[{"c": 120}, self._row(9)])
+        with mock.patch.object(db, "_connect", return_value=fake):
+            db.list_dates_page(2, 30)
+        self.assertEqual(fake.cur.executed[1][1], (30, 30))
+
+    def test_clamps_page_and_size(self):
+        fake = FakeConn(rows=[{"c": 0}, self._row(1)])
+        with mock.patch.object(db, "_connect", return_value=fake):
+            db.list_dates_page(0, 0)
+        self.assertEqual(fake.cur.executed[1][1], (1, 0))
+
+
 class CsvTest(unittest.TestCase):
     def test_format_csv_headers_and_quoting(self):
         stocks = [
@@ -214,6 +249,153 @@ class CsvTest(unittest.TestCase):
         self.assertTrue(lines[0].startswith("日期,代码,名称"))
         self.assertIn('"测试,股份"', lines[1])
         self.assertEqual(len(lines), 2)
+
+
+def seal_record(**overrides):
+    r = {
+        "tradeDate": "2026-08-10", "code": "300059", "name": "东方财富",
+        "sampleTime": "09:25", "bid1Price": 20.02, "bid1Volume": 9196.0,
+        "ask1Price": 20.03, "ask1Volume": 500.0, "lastPrice": 20.02,
+        "prevClose": 18.2, "sealAmount": 18410392.0, "sealRank": 1,
+        "fetchedAt": "2026-08-10 09:25:01",
+    }
+    r.update(overrides)
+    return r
+
+
+class SaveSealTest(unittest.TestCase):
+    def setUp(self):
+        db._available = True
+        db._last_error = ""
+
+    def test_empty_records_not_saved(self):
+        with mock.patch.object(db, "_connect") as connect:
+            self.assertFalse(db.save_seal([]))
+            connect.assert_not_called()
+
+    def test_save_uses_upsert(self):
+        fake = FakeConn()
+        with mock.patch.object(db, "_connect", return_value=fake):
+            self.assertTrue(db.save_seal([seal_record()]))
+        sql = fake.cur.executed[0][0]
+        self.assertIn("INSERT INTO auction_seal", sql)
+        self.assertIn("ON DUPLICATE KEY UPDATE", sql)
+        args = fake.cur.executed[0][1]
+        self.assertEqual(args[0][0], "2026-08-10")  # executemany args 是 tuple 列表
+        self.assertTrue(fake.committed)
+
+    def test_db_error_fails_soft(self):
+        with mock.patch.object(db, "_connect", side_effect=RuntimeError("boom")):
+            self.assertFalse(db.save_seal([seal_record()]))
+        self.assertFalse(db.is_available())
+        self.assertIn("boom", db.last_error())
+
+    def test_none_numeric_mapped(self):
+        fake = FakeConn()
+        rec = seal_record(bid1Price=None)
+        with mock.patch.object(db, "_connect", return_value=fake):
+            self.assertTrue(db.save_seal([rec]))
+        vals = fake.cur.executed[0][1][0]
+        self.assertIsNone(vals[4])  # bid1_price 索引位
+
+
+class SealQueryTest(unittest.TestCase):
+    def _row(self, **overrides):
+        r = {
+            "code": "300059", "name": "东方财富", "sample_time": "09:25",
+            "bid1_price": 20.02, "bid1_volume": 9196.0, "ask1_price": 20.03,
+            "ask1_volume": 500.0, "last_price": 20.02, "prev_close": 18.2,
+            "seal_amount": 18410392.0, "seal_rank": 1,
+            "fetched_at": datetime(2026, 8, 10, 9, 25, 1),
+        }
+        r.update(overrides)
+        return r
+
+    def test_get_seal_shape(self):
+        with mock.patch.object(db, "_connect", return_value=FakeConn(rows=[self._row()])):
+            rows = db.get_seal("2026-08-10")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["code"], "300059")
+        self.assertEqual(rows[0]["sampleTime"], "09:25")
+        self.assertEqual(rows[0]["sealRank"], 1)
+        self.assertEqual(rows[0]["fetchedAt"], "2026-08-10 09:25:01")
+
+    def test_list_seal_dates_shape(self):
+        row = {
+            "trade_date": date(2026, 8, 10),
+            "pool_count": 20,
+            "times": "09:15,09:20,09:25",
+        }
+        with mock.patch.object(db, "_connect", return_value=FakeConn(rows=[row])):
+            dates = db.list_seal_dates()
+        self.assertEqual(dates[0]["date"], "2026-08-10")
+        self.assertEqual(dates[0]["poolCount"], 20)
+        self.assertEqual(dates[0]["times"], ["09:15", "09:20", "09:25"])
+
+
+class SaveClosePctTest(unittest.TestCase):
+    def setUp(self):
+        db._available = True
+        db._last_error = ""
+
+    def test_empty_map_not_saved(self):
+        with mock.patch.object(db, "_connect") as connect:
+            self.assertFalse(db.save_close_pct("2026-08-11", {}))
+            connect.assert_not_called()
+
+    def test_no_day_returns_false(self):
+        fake = FakeConn(rows=[None])  # SELECT id 无结果
+        with mock.patch.object(db, "_connect", return_value=fake):
+            self.assertFalse(db.save_close_pct("2026-08-11", {"600721": 10.0}))
+        self.assertIn("无竞价快照", db.last_error())
+
+    def test_updates_close_pct(self):
+        fake = FakeConn(rows=[{"id": 7}])
+        with mock.patch.object(db, "_connect", return_value=fake):
+            self.assertTrue(db.save_close_pct("2026-08-11", {"600721": 10.0, "300246": 4.22}))
+        select_sql = fake.cur.executed[0][0]
+        self.assertIn("SELECT id FROM auction_day", select_sql)
+        update_sql = fake.cur.executed[1][0]
+        self.assertIn("UPDATE auction_stock SET close_pct", update_sql)
+        args = fake.cur.executed[1][1]
+        self.assertEqual(args[0], (10.0, None, 7, "600721"))
+        self.assertEqual(args[1], (4.22, None, 7, "300246"))
+        self.assertTrue(fake.committed)
+
+    def test_db_error_fails_soft(self):
+        with mock.patch.object(db, "_connect", side_effect=RuntimeError("boom")):
+            self.assertFalse(db.save_close_pct("2026-08-11", {"600721": 10.0}))
+        self.assertFalse(db.is_available())
+        self.assertIn("boom", db.last_error())
+
+
+class ReviewHorsesTest(unittest.TestCase):
+    def test_save_review_with_horses(self):
+        fake = FakeConn()
+        horses = {"headHorses": [{"code": "new_swzz", "name": "生物制药", "changePct": 2.06}],
+                  "darkHorses": [{"code": "new_dqhy", "name": "电器行业", "changePct": 2.96}]}
+        with mock.patch.object(db, "_connect", return_value=fake):
+            ok = db.save_review("2026-08-11", indices=[{"name": "上证指数"}], horses=horses)
+        self.assertTrue(ok)
+        sql, args = fake.cur.executed[0]
+        self.assertIn("horses_json", sql)
+        # args: date, indices, breadth, pools, lianban, manual, horses, fetched_at
+        self.assertEqual(args[0], "2026-08-11")
+        self.assertIn("headHorses", args[6])
+        self.assertTrue(fake.committed)
+
+    def test_read_review_horses(self):
+        row = {
+            "trade_date": date(2026, 8, 11),
+            "fetched_at": datetime(2026, 8, 11, 15, 5, 0),
+            "indices_json": None, "breadth_json": None, "pools_json": None,
+            "lianban_json": None, "manual_json": '{"news": "x"}',
+            "horses_json": '{"headHorses": [{"name": "生物制药"}], "darkHorses": []}',
+        }
+        with mock.patch.object(db, "_connect", return_value=FakeConn(rows=[row])):
+            r = db.read_review("2026-08-11")
+        self.assertEqual(r["horses"]["headHorses"][0]["name"], "生物制药")
+        self.assertEqual(r["manual"]["news"], "x")
 
 
 if __name__ == "__main__":

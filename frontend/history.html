@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>历史竞价 · 竞价选股器</title>
+  <title>历史竞价 · 量化选股器</title>
   <link rel="stylesheet" href="styles.css">
   <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <script defer src="history.js"></script>
@@ -36,6 +36,15 @@
             <span id="dateCount" class="panel-meta">—</span>
           </div>
           <div id="dateList" class="date-list"></div>
+          <div class="date-pager">
+            <button id="btnPagePrev" class="btn btn-ghost btn-sm" type="button" disabled>
+              <i data-lucide="chevron-left" aria-hidden="true"></i><span>上一页</span>
+            </button>
+            <span id="pageInfo" class="page-info">—</span>
+            <button id="btnPageNext" class="btn btn-ghost btn-sm" type="button" disabled>
+              <i data-lucide="chevron-right" aria-hidden="true"></i><span>下一页</span>
+            </button>
+          </div>
         </section>
       </aside>
 
@@ -55,12 +64,12 @@
                   <th>名称 / 板块</th>
                   <th>竞价价</th>
                   <th>竞价涨幅</th>
+                  <th>收盘涨幅</th>
                   <th>竞价金额</th>
                   <th>昨日成交额</th>
                   <th>竞价占比</th>
                   <th>金额强度</th>
                   <th>竞价换手</th>
-                  <th>量比</th>
                   <th>流通市值</th>
                   <th>超预期分</th>
                   <th>状态</th>
