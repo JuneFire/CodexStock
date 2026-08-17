@@ -729,6 +729,67 @@ WHERE day_id = %s AND code = %s
 """
 
 
+def save_daily_baseline(date, baseline_map):
+    """保存某日全天成交额/换手/收盘（作为次日 9:25 的昨日基准）。
+    baseline_map: {code: {amount, turnover, close, changePct}}。MySQL 不可用返回 False。"""
+    global _available, _last_error
+    if not baseline_map:
+        _last_error = "基准数据为空"
+        return False
+    with _lock:
+        try:
+            conn = _connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM auction_day WHERE trade_date = %s", (date,))
+                    day = cur.fetchone()
+                    if not day:
+                        _last_error = "当日无竞价快照"
+                        return False
+                    day_id = day["id"]
+                    rows = []
+                    for code, b in baseline_map.items():
+                        code = str(code).zfill(6)
+                        amt = _num(b.get("amount"))
+                        if amt is None:
+                            continue
+                        rows.append((amt, _num(b.get("turnover")), _num(b.get("close")), day_id, code))
+                    if rows:
+                        cur.executemany(
+                            "UPDATE auction_stock SET yesterday_amount = %s, yesterday_turnover = %s, yesterday_close = %s WHERE day_id = %s AND code = %s",
+                            rows,
+                        )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+            _available = True
+            _last_error = ""
+            return True
+        except Exception as exc:
+            _available = False
+            _last_error = str(exc)
+            return False
+
+
+def load_daily_baseline(date):
+    """读取某日全天基准：返回 {code: {amount, turnover, close}}（来自 auction_stock 当日行）。"""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM auction_day WHERE trade_date = %s", (date,))
+            day = cur.fetchone()
+            if not day:
+                return {}
+            cur.execute(
+                "SELECT code, yesterday_amount AS amount, yesterday_turnover AS turnover, yesterday_close AS close FROM auction_stock WHERE day_id = %s",
+                (day["id"],),
+            )
+            rows = cur.fetchall()
+    return {r["code"]: {"amount": _num(r["amount"]), "turnover": _num(r["turnover"]), "close": _num(r["close"])} for r in rows}
+
+
 def save_close_pct(date, pct_map):
     """把 {code: 收盘涨幅%} 批量更新到当日 auction_stock 行。MySQL 不可用返回 False。"""
     global _available, _last_error

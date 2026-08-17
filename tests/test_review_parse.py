@@ -243,3 +243,39 @@ class TestComputeThreePick(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBuildPlanText(unittest.TestCase):
+    def _review(self):
+        return {
+            "indices": [{"name": "上证指数", "close": 3946.68, "changePct": 0.32, "open": 3933.55}],
+            "breadth": {"up": 3860, "down": 1217},
+            "pools": {
+                "ztCount": 92, "dtCount": 0, "zbCount": 13,
+                "ztMeta": {"frontSectors": [{"name": "专用设备", "count": 8}, {"name": "通用设备", "count": 8}]},
+            },
+            "lianban": {"maxTier": 7, "tier": {
+                "7": [{"code": "600721", "name": "百花医药", "industry": "医疗服务", "sealAmount": 8.35e7}],
+                "4": [{"code": "603758", "name": "秦安股份", "industry": "汽车零部", "sealAmount": 2.71e8}],
+                "first": [{"code": "600105", "name": "永鼎股份", "industry": "通用设备", "sealAmount": 1e8}],
+            }},
+            "horses": {"headHorses": [{"name": "房地产", "changePct": 4.67}]},
+        }
+
+    def test_structure(self):
+        original = server._fetch_plan_news
+        server._fetch_plan_news = lambda: ["测试消息"]
+        try:
+            text = server._build_plan_text("2026-08-13", self._review())
+        finally:
+            server._fetch_plan_news = original
+        for kw in ["2026年8月13日早盘预案", "大局观", "具体机会解析", "总结", "投资有风险", "百花医药", "7板", "封单8350万", "秦安股份", "封单2.71亿", "测试消息"]:
+            self.assertIn(kw, text, "缺少: " + kw)
+
+    def test_no_review_fallback(self):
+        text = server._build_plan_text("2026-08-13", None)
+        self.assertIn("复盘数据缺失", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

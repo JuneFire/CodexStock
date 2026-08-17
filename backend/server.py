@@ -38,6 +38,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRONTEND_DIR = os.path.join(PROJECT_ROOT, "frontend")
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 LATEST_FILE = os.path.join(DATA_DIR, "latest.json")
+PLAN_DIR = os.path.join(DATA_DIR, "plan")
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -91,6 +92,9 @@ AUTO_FETCH_IDLE_SECONDS = 300  # 当日抓取成功后静默等待，不再 20 �
 SEAL_SAMPLE_TIMES = ["09:15", "09:20", "09:25"]
 SEAL_BATCH_SIZE = 500       # 腾讯批量直连每批股票数
 SEAL_TOP_N = 20             # 全市场封单额取前 N
+
+PLAN_FETCH_HM = 8 * 60 + 30  # 早晨 8:30 自动生成当天早盘预案
+PLAN_NEWS_LIMIT = 8          # 预案引用的隔夜快讯条数
 
 # 腾讯 qt.gtimg.cn 字段索引
 TX_NAME_IDX = 1
@@ -717,15 +721,38 @@ def _build_snapshot(auto=False):
     now = datetime.now()
     snapshot_date = now.strftime("%Y-%m-%d")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(fetch_yesterday_metric, s, snapshot_date): s for s in snapshot}
-        yesterday_map = {}
-        for future in concurrent.futures.as_completed(futures):
-            stock = futures[future]
-            try:
-                yesterday_map[stock["code"]] = future.result()
-            except Exception:
-                yesterday_map[stock["code"]] = None
+    # 先读上一交易日全天基准缓存（收盘时已存），命中则跳过逐只拉日K，大幅提速
+    yesterday_map = {}
+    try:
+        prev_date = db.list_dates(1)[0]["date"] if db.list_dates(1) else None
+        if prev_date and prev_date < snapshot_date:
+            cached = db.load_daily_baseline(prev_date)
+            for s in snapshot:
+                code = s.get("code")
+                b = cached.get(code)
+                if b and b.get("amount"):
+                    yesterday_map[code] = {
+                        "yesterdayAmount": b["amount"],
+                        "yesterdayTurnover": b.get("turnover"),
+                        "yesterdayClose": b.get("close"),
+                    }
+    except Exception as exc:
+        print("[fetch] 基准缓存读取失败，走逐只拉取: %r" % exc, flush=True)
+
+    missing = [s for s in snapshot if s.get("code") not in yesterday_map]
+    if missing:
+        print("[fetch] 基准缓存命中 %d/%d，逐只拉取 %d 只" % (
+            len(snapshot) - len(missing), len(snapshot), len(missing)), flush=True)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(fetch_yesterday_metric, s, snapshot_date): s for s in missing}
+            for future in concurrent.futures.as_completed(futures):
+                stock = futures[future]
+                try:
+                    yesterday_map[stock["code"]] = future.result()
+                except Exception:
+                    yesterday_map[stock["code"]] = None
+    else:
+        print("[fetch] 基准缓存全部命中，跳过逐只拉取", flush=True)
 
     # 板块补齐：仅对缺失/占位行业使用新浪行业映射（东财直连命中时保留原 f100）
     sector_map = load_sector_map()
@@ -886,6 +913,40 @@ def fetch_realtime_pct(codes):
     return out
 
 
+def fetch_realtime_baseline(codes):
+    """腾讯批量实时：返回 {code: {amount, turnover, close, changePct}}。
+    收盘后调用即当日全天数据，作为次日 9:25 竞价抓取的"昨日基准"。"""
+    if ak is None:
+        raise RuntimeError("akshare 未安装")
+    out = {}
+    seen = set()
+    batch = []
+    for c in codes:
+        c = str(c).zfill(6)
+        if c in seen:
+            continue
+        seen.add(c)
+        prefix = "sh" if c.startswith("6") else "sz"
+        batch.append(prefix + c)
+    for i in range(0, len(batch), 40):
+        url = "https://qt.gtimg.cn/q=" + ",".join(batch[i:i + 40])
+        resp = _gtimg_get(url)
+        for line in resp.text.splitlines():
+            if "=" not in line:
+                continue
+            payload = line.split("=", 1)[1].strip().strip('"').strip(";")
+            fields = payload.split("~")
+            if len(fields) > 38 and fields[2]:
+                code = str(fields[2]).zfill(6)
+                out[code] = {
+                    "amount": (to_float(fields[37]) or 0) * 1e4,   # 成交额 万元→元
+                    "turnover": to_float(fields[38]),              # 换手率 %
+                    "close": to_float(fields[3]),                  # 现价
+                    "changePct": to_float(fields[32]),             # 涨跌幅 %
+                }
+    return out
+
+
 def build_realtime():
     """基于最新快照的 200 只，返回各自当前涨幅。"""
     snapshot = load_latest()
@@ -900,6 +961,182 @@ def build_realtime():
         "fetchedAt": datetime.now().strftime("%H:%M:%S"),
         "realtime": pct_map,
     }
+
+
+def list_plan_dates():
+    """data/plan/ 下已有的预案日期列表，倒序。"""
+    if not os.path.isdir(PLAN_DIR):
+        return []
+    try:
+        names = sorted(f for f in os.listdir(PLAN_DIR) if f.endswith(".txt"))
+    except OSError:
+        return []
+    return [n[:-4] for n in names][::-1]
+
+
+def load_plan(date_str):
+    """读取某日预案文本。返回 {"ok", "date", "text"}；无则 {"ok": False, "error"}。"""
+    path = os.path.join(PLAN_DIR, date_str + ".txt")
+    if not os.path.isfile(path):
+        return {"ok": False, "error": "未找到该日预案: %s" % date_str}
+    try:
+        with open(path, encoding="utf-8-sig") as f:  # 兼容带 BOM
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            return {"ok": False, "error": "预案读取失败: %s" % exc}
+    return {"ok": True, "date": date_str, "text": text}
+
+
+# ---------- 早盘预案自动生成 ----------
+def _fetch_plan_news():
+    """抓取隔夜财经快讯（东财优先，新浪/同花顺降级）。返回最近几条文本摘要。"""
+    if ak is None:
+        return ["隔夜消息未获取到（akshare 不可用）"]
+    import io
+    import contextlib
+    candidates = []
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            df = ak.stock_info_global_em()
+        for _, r in df.head(PLAN_NEWS_LIMIT).iterrows():
+            title = str(r.get("标题") or "").strip()
+            if title:
+                candidates.append(title)
+    except Exception:
+        candidates = []
+    if not candidates:
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                df = ak.stock_info_global_sina()
+            for _, r in df.head(PLAN_NEWS_LIMIT).iterrows():
+                content = str(r.get("内容") or "").strip()
+                if content:
+                    candidates.append(content[:60])
+        except Exception:
+            candidates = []
+    if not candidates:
+        return ["隔夜消息未获取到"]
+    return candidates[:PLAN_NEWS_LIMIT]
+
+
+def _format_seal_yi(seal):
+    """封单额(元) -> 'X.XX亿' 或 'X万'。"""
+    if not seal:
+        return ""
+    seal = float(seal)
+    if seal >= 1e8:
+        return "%.2f亿" % (seal / 1e8)
+    if seal >= 1e4:
+        return "%.0f万" % (seal / 1e4)
+    return "%.0f元" % seal
+
+
+def _plan_sentiment_label(zt, dt, zb, max_tier):
+    """情绪定性：涨停收缩+炸板高+连板降 → 退潮；涨停放量+连板升 → 发酵。"""
+    if zt is None:
+        return "待观察"
+    if zt >= 80 and max_tier and max_tier >= 6:
+        return "发酵/高潮"
+    if zt <= 50 or (zb is not None and zb >= 25):
+        return "退潮/分歧"
+    return "分歧中"
+
+
+def _build_plan_text(today, review):
+    """基于昨日复盘数据生成当天早盘预案文本。review 为 db.read_review(最近复盘日)。"""
+    if not review:
+        return "%s早盘预案\n\n大局观\n指数:昨日复盘数据缺失，无法生成。\n总结\n投资有风险，入市需谨慎！" % today
+
+    idx = review.get("indices") or []
+    sh = next((i for i in idx if i.get("name") == "上证指数"), {})
+    pools = review.get("pools") or {}
+    lb = review.get("lianban") or {}
+    tier = lb.get("tier") or {}
+    breadth = review.get("breadth") or {}
+    horses = review.get("horses") or {}
+    zt_meta = pools.get("ztMeta") or {}
+    news_list = _fetch_plan_news()
+
+    zt = pools.get("ztCount")
+    dt = pools.get("dtCount")
+    zb = pools.get("zbCount")
+    max_tier = lb.get("maxTier") or 0
+    label = _plan_sentiment_label(zt, dt, zb, max_tier)
+
+    lines = []
+    lines.append("%s年%s月%s日早盘预案" % (today[:4], str(int(today[5:7])), str(int(today[8:10]))))
+    lines.append("")
+
+    # 大局观
+    lines.append("大局观")
+    sh_close = sh.get("close")
+    sh_pct = sh.get("changePct")
+    sh_open = sh.get("open")
+    lines.append("指数:昨日上证开%s,收%s(%+.2f%%),今日压力/支撑结合近期K线结构推演。高开>前高修复,低开<昨收回踩,中间开整理盘。" % (
+        ("%.2f" % sh_open) if sh_open is not None else "—",
+        ("%.2f" % sh_close) if sh_close is not None else "—",
+        sh_pct if sh_pct is not None else 0,
+    ))
+    lines.append("情绪:昨日涨停%s家、炸板%s家,连板高度%s板,%s。涨%s家/跌%s家。" % (
+        zt if zt is not None else "—",
+        zb if zb is not None else "—",
+        max_tier or "—",
+        label,
+        (breadth or {}).get("up", "—"),
+        (breadth or {}).get("down", "—"),
+    ))
+    # 多头/空头风标
+    if tier:
+        top_tier = max([k for k in ("first", "2", "3", "4", "5", "6", "7", "8") if tier.get(k)], key=lambda k: (0 if k == "first" else int(k)), default=None)
+        head_stock = (tier.get("first") or [])[:1]
+        if top_tier and top_tier != "first" and tier.get(top_tier):
+            head_stock = tier[top_tier][:1]
+        if head_stock:
+            lines.append("今日多头看%s;空头看高位分歧股（情绪风标,非推荐）。" % head_stock[0].get("name", "—"))
+    # 题材
+    front = zt_meta.get("frontSectors") or []
+    head_names = [h.get("name") for h in (horses.get("headHorses") or [])[:3]]
+    if front or head_names:
+        topic = "、".join(f.get("name") for f in front[:4])
+        horse_txt = "、".join(head_names)
+        extra = ("头等马板块:%s。" % horse_txt) if horse_txt else ""
+        lines.append("题材:昨日最强%s。%s今日先看主线分化力度,再看次线持续性。" % (topic or "待观察", extra))
+    lines.append("消息:%s" % (";".join(news_list[:4]) if news_list else "隔夜消息未获取到"))
+    lines.append("")
+
+    # 具体机会解析
+    lines.append("具体机会解析")
+    lines.append("短线方面")
+    tiers_desc = [("8", 8), ("7", 7), ("6", 6), ("5", 5), ("4", 4), ("3", 3), ("2", 2)]
+    for key, n in tiers_desc:
+        stocks = tier.get(key) or []
+        for s in stocks[:2]:
+            seal = _format_seal_yi(s.get("sealAmount"))
+            lines.append("%s,%d板,%s,%s。%s。" % (
+                s.get("name", "—"), n, s.get("industry", ""),
+                ("封单%s" % seal) if seal else "—",
+                "断板预期,回避或断板后调整低吸" if n >= 5 else ("一字预期,看有无炸板低吸" if seal else "看竞价承接")))
+    first = tier.get("first") or []
+    if first:
+        lines.append("首板:%s。%s" % ("、".join(s.get("name", "") for s in first[:4]), "看竞价强弱,一进二观察。"))
+    lines.append("")
+    lines.append("题材方面")
+    if front:
+        for f in front[:4]:
+            lines.append("%s:昨日%s家涨停。今日看持续性,关注资金对流。" % (f.get("name"), f.get("count")))
+    else:
+        lines.append("待观察。")
+    lines.append("")
+    lines.append("其他对流")
+    lines.append("高位抱团:若高位股分歧加大,注意减仓做厚利润垫。")
+    lines.append("")
+    lines.append("总结")
+    lines.append("昨日情绪%s。今日要消化分歧后选择方向,聚焦领涨细分,风格轮动注意节奏。投资有风险,入市需谨慎!" % label)
+    return "\n".join(lines)
 
 
 # ---------- 行业指数合成（头马/黑马） ----------
@@ -1257,8 +1494,15 @@ def _run_close_sample():
             print("[close] 无竞价快照，跳过", flush=True)
             return
         codes = [s.get("code") for s in stocks if s.get("code")]
-        pct_map = fetch_realtime_pct(codes)  # 收盘后接口返回的就是最终涨幅
+        baseline = fetch_realtime_baseline(codes)  # 收盘后返回当日全天成交额/换手/收盘
+        pct_map = {c: b.get("changePct") for c, b in baseline.items()}
         date = snapshot.get("date")
+        if baseline:
+            # 保存当日全天基准，次日 9:25 抓竞价时直接读缓存，跳过逐只拉日K
+            if not db.save_daily_baseline(date, baseline):
+                print("[close] 基准入库失败: %s" % db.last_error(), flush=True)
+            else:
+                print("[close] 全天基准已入库: %s %d 只" % (date, len(baseline)), flush=True)
         if not db.save_close_pct(date, pct_map):
             print("[close] 入库失败: %s" % db.last_error(), flush=True)
         else:
@@ -1299,6 +1543,52 @@ def close_fetch_loop(enabled=True):
         time.sleep(sleep_secs)
         _run_close_sample()
         _run_close_review()
+
+
+# ---------- 早盘预案定时生成 ----------
+def _run_plan_generation():
+    """早晨生成当天预案：基于最近已保存复盘 + 隔夜消息，写 data/plan/<今日>.txt。"""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        # 取最近已保存的复盘日（可能因非交易日顺延到更早）
+        review_date = None
+        try:
+            dates = db.list_review_dates(10)
+            for d in dates:
+                if d["date"] < today:
+                    review_date = d["date"]
+                    break
+        except Exception:
+            review_date = None
+        review = db.read_review(review_date) if review_date else None
+        text = _build_plan_text(today, review)
+        os.makedirs(PLAN_DIR, exist_ok=True)
+        path = os.path.join(PLAN_DIR, today + ".txt")
+        with open(path, "w", encoding="utf-8-sig") as f:  # BOM，兼容 plan 页读取
+            f.write(text)
+        print("[plan] 预案已生成: %s（基于 %s 复盘）" % (today, review_date or "无"), flush=True)
+    except Exception as exc:
+        print("[plan] 预案生成失败: %r" % exc, flush=True)
+
+
+def plan_fetch_loop(enabled=True):
+    """交易日 8:30 自动生成当天早盘预案，独立于竞价/封单/收盘线程。"""
+    if not enabled:
+        return
+    while True:
+        now = datetime.now()
+        if now.weekday() >= 5 or not is_trading_day(now):
+            time.sleep(_sleep_until_trade_morning())
+            continue
+        hm = now.hour * 60 + now.minute
+        if hm >= PLAN_FETCH_HM:
+            # 当日 8:30 已过，睡到次日 9:15 前
+            time.sleep(_sleep_until_trade_morning())
+            continue
+        sleep_secs = max(1, (now.replace(hour=8, minute=30, second=0, microsecond=0) - datetime.now()).total_seconds())
+        time.sleep(sleep_secs)
+        _run_plan_generation()
+
 
 ZT_POOL_FUNCS = {
     "zt": "stock_zt_pool_em",
@@ -1739,6 +2029,16 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 self.send_json(day)
             return
+        if parsed.path == "/api/plan/dates":
+            self.send_json({"ok": True, "dates": list_plan_dates()})
+            return
+        if parsed.path == "/api/plan":
+            date = (parse_qs(parsed.query).get("date") or [""])[0]
+            if not date:
+                self.send_json({"ok": False, "error": "缺少 date 参数"}, status=400)
+                return
+            self.send_json(load_plan(date))
+            return
         if parsed.path == "/api/history/stock":
             code = (parse_qs(parsed.query).get("code") or [""])[0]
             try:
@@ -1864,6 +2164,7 @@ def main():
     threading.Thread(target=auto_fetch_loop, args=(not args.no_auto,), daemon=True).start()
     threading.Thread(target=seal_fetch_loop, args=(not args.no_auto,), daemon=True).start()
     threading.Thread(target=close_fetch_loop, args=(not args.no_auto,), daemon=True).start()
+    threading.Thread(target=plan_fetch_loop, args=(not args.no_auto,), daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     print("量化选股器已启动: http://127.0.0.1:%d" % args.port, flush=True)
     if args.auto_anytime:
@@ -1873,6 +2174,7 @@ def main():
     if not args.no_auto:
         print("[seal] 封单抓取已开启：每个交易日 9:15/9:20/9:25", flush=True)
         print("[close] 收盘自动任务已开启：每个交易日 15:05（收盘涨幅入库 + 自动生成当日复盘）", flush=True)
+        print("[plan] 早盘预案自动生成已开启：每个交易日 8:30", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

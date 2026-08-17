@@ -1663,3 +1663,103 @@ input[type="search"] {
   font-weight: 600;
   white-space: nowrap;
 }
+
+/* ---------- 早盘预案 ---------- */
+.plan-main {
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.plan-panel {
+  padding: 24px 28px;
+}
+
+.plan-content {
+  font-family: inherit;
+  line-height: 2;
+  color: var(--text);
+  font-size: 15px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.plan-title {
+  font-size: 21px;
+  font-weight: 700;
+  color: var(--text);
+  text-align: center;
+  margin: 0 0 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.plan-section {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 24px 0 12px;
+  padding: 9px 12px;
+  background: var(--surface-2, rgba(0, 0, 0, 0.03));
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+}
+
+.plan-sub {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 14px 0 6px;
+}
+
+.plan-line {
+  margin: 5px 0;
+  color: var(--text);
+  letter-spacing: 0.2px;
+}
+
+/* 高亮信息 */
+.pl-name {
+  font-weight: 700;
+  color: var(--text);
+}
+.pl-lb {
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.pl-pt {
+  font-weight: 700;
+  color: var(--up);
+}
+.pl-up {
+  color: var(--up);
+  font-weight: 600;
+}
+.pl-down {
+  color: var(--down);
+  font-weight: 600;
+}
+.pl-pct {
+  color: var(--text-2);
+  font-weight: 600;
+}
+.pl-key {
+  font-weight: 700;
+  color: var(--warn);
+}
+
+.plan-blank {
+  height: 10px;
+}
+
+.plan-empty {
+  padding: 48px 0;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 14px;
+}
+

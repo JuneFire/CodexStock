@@ -263,7 +263,6 @@
     els.reviewDate.textContent = state.date;
     const d = state.data;
     els.reviewStatus.textContent = d.cached ? '已缓存 · ' + (d.fetchedAt || '') : (d.fetchedAt ? '抓取于 ' + (d.fetchedAt || '') : '未抓取');
-    els.btnFetch.disabled = d.cached && d.fetchedAt;
     refreshIcons();
   }
 

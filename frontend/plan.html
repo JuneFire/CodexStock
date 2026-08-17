@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>早盘预案 · 量化选股器</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="plan.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <a class="btn btn-ghost btn-sm" href="index.html" id="btnBack" type="button">
+          <i data-lucide="arrow-left" aria-hidden="true"></i><span>返回</span>
+        </a>
+        <span class="brand-mark"><i data-lucide="sunrise" aria-hidden="true"></i></span>
+        <div class="brand-text">
+          <h1>早盘预案</h1>
+          <p id="planStatus">—</p>
+        </div>
+      </div>
+      <div class="topbar-tools">
+        <button id="btnPrevDay" class="btn btn-ghost" type="button" data-tooltip="前一天"><i data-lucide="chevron-left" aria-hidden="true"></i></button>
+        <span id="planDate" class="panel-meta">—</span>
+        <button id="btnNextDay" class="btn btn-ghost" type="button" data-tooltip="后一天"><i data-lucide="chevron-right" aria-hidden="true"></i></button>
+        <a class="btn" href="review.html" data-tooltip="每日情绪周期复盘">
+          <i data-lucide="clipboard-list" aria-hidden="true"></i><span>复盘</span>
+        </a>
+      </div>
+    </header>
+
+    <main class="main plan-main">
+      <section class="panel plan-panel">
+        <div class="plan-content" id="planContent">
+          <div class="plan-empty">加载中…</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
