@@ -38,6 +38,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRONTEND_DIR = os.path.join(PROJECT_ROOT, "frontend")
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 LATEST_FILE = os.path.join(DATA_DIR, "latest.json")
+HISTORY_DIR = os.path.join(DATA_DIR, "history")
 PLAN_DIR = os.path.join(DATA_DIR, "plan")
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -78,6 +79,18 @@ _lock = threading.Lock()
 _fetch_lock = threading.Lock()
 _review_lock = threading.Lock()
 _trading_day_cache = {}  # 按日期缓存交易日判断结果，避免窗口内每次检查都请求接口
+
+# 复盘抓取进度：{date: {stage, percent, message, done}}，供前端进度条轮询
+_review_progress = {}
+_review_progress_lock = threading.Lock()
+
+
+def _set_review_progress(date, stage, percent, message="", done=False):
+    with _review_progress_lock:
+        _review_progress[date] = {
+            "date": date, "stage": stage, "percent": percent,
+            "message": message, "done": done,
+        }
 
 # 测试开关：--auto-anytime 时自动抓取不受 9:25-9:30 窗口限制（用于验证自动抓取+入库链路）
 AUTO_ANYTIME = False
@@ -885,6 +898,88 @@ def load_latest():
         return json.load(f)
 
 
+def _history_json_dates():
+    """MySQL 不可用时，从 data/history/*.json 读历史日期列表（倒序，对齐 list_dates_page 格式）。"""
+    out = []
+    if os.path.isdir(HISTORY_DIR):
+        for name in os.listdir(HISTORY_DIR):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(HISTORY_DIR, name)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    snap = json.load(f)
+                stocks = snap.get("stocks") or []
+                out.append({
+                    "date": snap.get("date") or name[:-5],
+                    "fetchedAt": snap.get("fetchedAt") or "",
+                    "source": snap.get("source") or "JSON",
+                    "auto": bool(snap.get("auto")),
+                    "valid": bool(snap.get("validForAuction", True)),
+                    "stockCount": len(stocks),
+                })
+            except Exception:
+                continue
+    out.sort(key=lambda d: d["date"], reverse=True)
+    return out
+
+
+def _history_json_day(date_str):
+    """MySQL 不可用时，读单日 JSON 快照（对齐 get_day 格式）。"""
+    path = os.path.join(HISTORY_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            snap = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return {
+        "ok": True,
+        "date": snap.get("date") or date_str,
+        "fetchedAt": snap.get("fetchedAt") or "",
+        "source": snap.get("source") or "JSON",
+        "auto": bool(snap.get("auto")),
+        "validForAuction": bool(snap.get("validForAuction", True)),
+        "market": snap.get("market") or {},
+        "stocks": snap.get("stocks") or [],
+    }
+
+
+def _history_json_stock(code_str, limit=120):
+    """MySQL 不可用时，跨 JSON 快照查个股多日历史（对齐 get_stock_history 格式）。"""
+    rows = []
+    if os.path.isdir(HISTORY_DIR):
+        for name in sorted(os.listdir(HISTORY_DIR), reverse=True):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(HISTORY_DIR, name)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    snap = json.load(f)
+            except Exception:
+                continue
+            date = snap.get("date") or name[:-5]
+            for s in snap.get("stocks") or []:
+                if s.get("code") == code_str:
+                    item = dict(s)
+                    item["date"] = date
+                    rows.append(item)
+                    break
+            if len(rows) >= limit:
+                break
+    return rows
+
+
+def _history_json_export(date_str):
+    """MySQL 不可用时，导出某日 JSON 快照为 CSV。返回文本 | None。"""
+    day = _history_json_day(date_str)
+    if not day:
+        return None
+    return db.format_csv(day["date"], day["stocks"])
+
+
+
 def fetch_realtime_pct(codes):
     """腾讯批量实时行情：返回 {6位代码: 当前涨幅%}。codes 去重后分页拉取。"""
     if ak is None:
@@ -1242,24 +1337,51 @@ def build_sector_indices():
 
 
 def load_sector_indices(force=False):
-    """返回 {label: {name, dates, closes, volumes}}。模块缓存 > 磁盘缓存(TTL 1天) > 重建。"""
+    """返回 {label: {name, dates, closes, volumes}}。
+    模块缓存 > 磁盘缓存 > 后台异步重建（不阻塞调用方；过期先返回旧缓存）。"""
     if not force and _sector_index_cache.get("indices"):
         return _sector_index_cache["indices"]
+    stale = None
     try:
         with open(SECTOR_INDEX_FILE, encoding="utf-8") as f:
             data = json.load(f)
-        age = (datetime.now() - datetime.fromisoformat(data["built_at"])).days
-        if age < SECTOR_INDEX_TTL_DAYS and isinstance(data.get("indices"), dict):
+        if isinstance(data.get("indices"), dict) and data["indices"]:
+            age = (datetime.now() - datetime.fromisoformat(data["built_at"])).days
             _sector_index_cache.update(data)
+            if age >= SECTOR_INDEX_TTL_DAYS:
+                stale = data["indices"]  # 过期但可用，先返回旧缓存并后台重建
+                _kick_sector_rebuild()
             return data["indices"]
     except Exception:
         pass
-    indices = build_sector_indices()
-    if indices:
-        _sector_index_cache["built_at"] = datetime.now().isoformat()
-        _sector_index_cache["indices"] = indices
-        return indices
+    if not _sector_index_cache.get("indices"):
+        # 无任何缓存：后台重建，返回空（页面显示暂无）
+        _kick_sector_rebuild()
     return _sector_index_cache.get("indices") or {}
+
+
+_rebuild_started = False
+
+
+def _kick_sector_rebuild():
+    """后台线程重建行业指数缓存，避免阻塞主流程。"""
+    global _rebuild_started
+    if _rebuild_started:
+        return
+    _rebuild_started = True
+    def _rebuild():
+        try:
+            indices = build_sector_indices()
+            if indices:
+                _sector_index_cache["built_at"] = datetime.now().isoformat()
+                _sector_index_cache["indices"] = indices
+            print("[horses] 行业指数后台重建完成: %d 个" % len(indices or {}), flush=True)
+        except Exception as exc:
+            print("[horses] 后台重建失败: %r" % exc, flush=True)
+        finally:
+            global _rebuild_started
+            _rebuild_started = False
+    threading.Thread(target=_rebuild, daemon=True).start()
 
 
 def _ma(series, n):
@@ -1861,9 +1983,15 @@ def _empty_review(date_str):
 
 def fetch_review_auto(date_str):
     """抓取某日全部自动复盘数据，合并成一个 dict。"""
+    _set_review_progress(date_str, "涨停池", 15, "抓取涨停/跌停/炸板池…")
     pools = fetch_zt_pools(date_str)
     zt_rows = pools.get("zt") or []
     strong_rows = pools.get("strong") or []
+    _set_review_progress(date_str, "指数", 35, "抓取指数行情…")
+    indices = fetch_indices_kline(date_str)
+    _set_review_progress(date_str, "红绿盘", 55, "统计涨跌家数…")
+    breadth = fetch_spot_breadth(date_str)
+    _set_review_progress(date_str, "三一票", 70, "计算竞价三一票…")
     # 竞价三一票：基于当日竞价 Top200（latest.json），金额/换手/涨幅三项第一命中≥2项
     three_pick = []
     try:
@@ -1871,9 +1999,10 @@ def fetch_review_auto(date_str):
         three_pick = compute_three_pick(snapshot.get("stocks") or [])
     except Exception as exc:
         print("[review] 三一票计算失败: %r" % exc, flush=True)
+    _set_review_progress(date_str, "连板/题材", 85, "解析连板梯队与题材…")
     result = {
-        "indices": fetch_indices_kline(date_str),
-        "breadth": fetch_spot_breadth(date_str),
+        "indices": indices,
+        "breadth": breadth,
         "pools": {
             "ztCount": len(zt_rows),
             "dtCount": len(pools.get("dt") or []),
@@ -1887,6 +2016,7 @@ def fetch_review_auto(date_str):
     }
     result["pools"]["ztMeta"] = result["ztMeta"]
     result["pools"]["threePick"] = three_pick  # 随 pools 持久化
+    _set_review_progress(date_str, "完成", 100, "抓取完成", done=True)
     return result
 
 
@@ -2015,15 +2145,27 @@ class Handler(SimpleHTTPRequestHandler):
                     "has_more": page * page_size < total,
                 })
             except Exception as exc:
-                self.send_json({"ok": False, "error": "MySQL 不可用: %s" % exc}, status=502)
+                # MySQL 不可用 → 降级读 data/history/*.json 归档
+                all_dates = _history_json_dates()
+                page, page_size = _parse_paging(parse_qs(parsed.query))
+                offset = (page - 1) * page_size
+                self.send_json({
+                    "ok": True, "dates": all_dates[offset:offset + page_size],
+                    "total": len(all_dates),
+                    "page": page, "page_size": page_size,
+                    "has_more": page * page_size < len(all_dates),
+                    "fallback": True, "error": "MySQL 不可用，已从 JSON 归档读取: %s" % exc,
+                })
             return
         if parsed.path == "/api/history/date":
             date = (parse_qs(parsed.query).get("date") or [""])[0]
             try:
                 day = db.get_day(date)
             except Exception as exc:
-                self.send_json({"ok": False, "error": "MySQL 不可用: %s" % exc}, status=502)
-                return
+                # MySQL 不可用 → 降级读 JSON
+                day = _history_json_day(date)
+                if day:
+                    day["fallback"] = True
             if not day:
                 self.send_json({"ok": False, "error": "未找到该日期: %s" % date}, status=404)
             else:
@@ -2044,7 +2186,10 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 rows = db.get_stock_history(code)
             except Exception as exc:
-                self.send_json({"ok": False, "error": "MySQL 不可用: %s" % exc}, status=502)
+                # MySQL 不可用 → 降级读 JSON 归档
+                rows = _history_json_stock(code)
+                self.send_json({"ok": True, "rows": rows, "fallback": True,
+                                "error": "MySQL 不可用，已从 JSON 归档读取: %s" % exc})
                 return
             self.send_json({"ok": True, "rows": rows})
             return
@@ -2053,8 +2198,8 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 csv_text = db.export_csv(date)
             except Exception as exc:
-                self.send_json({"ok": False, "error": "MySQL 不可用: %s" % exc}, status=502)
-                return
+                # MySQL 不可用 → 降级读 JSON 导出
+                csv_text = _history_json_export(date)
             if csv_text is None:
                 self.send_json({"ok": False, "error": "未找到该日期: %s" % date}, status=404)
                 return
@@ -2087,6 +2232,15 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": True, "dates": dates})
             except Exception as exc:
                 self.send_json({"ok": False, "error": "MySQL 不可用: %s" % exc}, status=502)
+            return
+        if parsed.path == "/api/review/progress":
+            date = (parse_qs(parsed.query).get("date") or [""])[0]
+            with _review_progress_lock:
+                prog = _review_progress.get(date)
+            if not prog:
+                self.send_json({"ok": True, "date": date, "percent": 0, "stage": "", "message": "", "done": False})
+            else:
+                self.send_json({"ok": True, **prog})
             return
         if parsed.path == "/api/review/horses":
             date = (parse_qs(parsed.query).get("date") or [""])[0]

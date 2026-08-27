@@ -62,6 +62,9 @@
     darkList: $('#darkList'),
     historyCount: $('#historyCount'),
     reviewDateList: $('#reviewDateList'),
+    fetchProgress: $('#fetchProgress'),
+    fetchProgressBar: $('#fetchProgressBar'),
+    fetchProgressText: $('#fetchProgressText'),
     btnFetch: $('#btnFetch'),
     btnSave: $('#btnSave'),
     btnPrevDay: $('#btnPrevDay'),
@@ -269,6 +272,7 @@
   // ---------- 数据 ----------
 
   async function loadReview(forceRefresh) {
+    if (forceRefresh) startProgressPolling();
     const url = '/api/review?date=' + encodeURIComponent(state.date) + (forceRefresh ? '&refresh=1' : '');
     try {
       const res = await fetch(url);
@@ -278,10 +282,42 @@
       state.data = data;
       state.manual = JSON.parse(JSON.stringify(data.manual || {}));
       render();
-      if (forceRefresh) toast('收盘复盘数据已抓取');
+      if (forceRefresh) {
+        stopProgressPolling();
+        toast('收盘复盘数据已抓取');
+      }
     } catch (err) {
+      stopProgressPolling();
       toast('加载失败：' + (err.message || err));
     }
+  }
+
+  // 复盘抓取进度条：点收盘复盘后轮询进度接口
+  let progressTimer = null;
+  function startProgressPolling() {
+    els.fetchProgress.hidden = false;
+    els.fetchProgressBar.style.width = '5%';
+    els.fetchProgressText.textContent = '开始抓取…';
+    clearInterval(progressTimer);
+    progressTimer = setInterval(async () => {
+      try {
+        const res = await fetch('/api/review/progress?date=' + encodeURIComponent(state.date));
+        const data = await res.json();
+        if (data && data.ok) {
+          const pct = data.percent || 0;
+          els.fetchProgressBar.style.width = pct + '%';
+          els.fetchProgressText.textContent = (data.message || data.stage || '') + ' ' + pct + '%';
+          if (data.done) {
+            clearInterval(progressTimer);
+            setTimeout(() => { els.fetchProgress.hidden = true; }, 500);
+          }
+        }
+      } catch (e) { /* 忽略轮询错误 */ }
+    }, 800);
+  }
+  function stopProgressPolling() {
+    clearInterval(progressTimer);
+    els.fetchProgress.hidden = true;
   }
 
   async function saveReview() {
