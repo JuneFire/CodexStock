@@ -883,6 +883,7 @@ def auto_fetch_loop(enabled=True):
             print("[auto] 交易日竞价已结束，开始自动抓取", flush=True)
             try:
                 build_snapshot(auto=True)
+                _run_top3_push()  # 竞价快照落盘后立即推送 Top3
                 fetched_date = today
                 print("[auto] 自动抓取完成，当日停止自动检查", flush=True)
             except Exception as exc:
@@ -1712,6 +1713,84 @@ def plan_fetch_loop(enabled=True):
         _run_plan_generation()
 
 
+# 交易信号推送（半自动）：竞价抓取完成后推送当日竞价 Top3 到微信（Server酱）
+
+
+def _get_serverchan_key():
+    """读取 config.json 的 serverchan.sendkey。"""
+    try:
+        cfg = db.load_config()  # 复用 db 的配置读取，返回 mysql 字段
+    except Exception:
+        cfg = {}
+    key = os.environ.get("SERVERCHAN_KEY", "")
+    if key:
+        return key
+    try:
+        with open(os.path.join(PROJECT_ROOT, "config.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        key = (data.get("serverchan") or {}).get("sendkey") or ""
+    except Exception:
+        key = ""
+    return key
+
+
+def _send_serverchan(title, desc):
+    """通过 Server酱推送微信消息。返回是否成功。"""
+    key = _get_serverchan_key()
+    if not key:
+        print("[push] 未配置 Server酱 sendkey，跳过推送", flush=True)
+        return False
+    try:
+        resp = _session.post(
+            "https://sctapi.ftqq.com/%s.send" % key,
+            data={"title": title, "desp": desc},
+            timeout=10,
+        )
+        ok = resp.status_code == 200 and ("success" in resp.text.lower())
+        print("[push] 推送%s: %s" % ("成功" if ok else "失败", title), flush=True)
+        return ok
+    except Exception as exc:
+        print("[push] 推送失败: %r" % exc, flush=True)
+        return False
+
+
+def _is_grab_stock(s):
+    """竞价抢筹：大幅放量(占昨≥200%) + 高金额强度(≥30bp) + 高开(≥3%)。"""
+    return (s.get("ratioToYesterday") or 0) >= 200 and \
+           (s.get("amountStrength") or 0) >= 30 and \
+           (s.get("changePct") or 0) >= 3
+
+
+def _run_top3_push():
+    """竞价抓取完成后推送超预期分最高的 Top3 个股到微信，供手动下单参考。"""
+    try:
+        snapshot = load_latest()
+        stocks = snapshot.get("stocks") or []
+        if not stocks:
+            print("[push] 无竞价快照，跳过", flush=True)
+            return
+        top3 = sorted(stocks, key=lambda s: s.get("score") or 0, reverse=True)[:3]
+        date = snapshot.get("date")
+        lines = ["# %s 竞价 Top3（按超预期分，手动下单参考）" % date]
+        for i, s in enumerate(top3, 1):
+            grab = " 🔥抢筹" if _is_grab_stock(s) else ""
+            lines.append("### %d. %s%s" % (
+                i, s.get("name"), grab))
+            lines.append("代码 %s · %s" % (s.get("code"), s.get("industry")))
+            lines.append("竞价金额 %.1f 亿 · 竞价换手 %.2f%% · 竞价涨幅 %+.2f%% · 流通市值 %.0f 亿 · 超预期分 %.1f" % (
+                (s.get("auctionAmount") or 0) / 1e8,
+                s.get("auctionTurnover") or 0,
+                s.get("changePct") or 0,
+                (s.get("floatCap") or 0) / 1e8,
+                s.get("score") or 0))
+            if i < len(top3):
+                lines.append("")
+        lines.append("\n> 仅供选股参考，非投资建议。手动确认后下单。")
+        _send_serverchan("竞价 Top3 · " + date, "\n\n".join(lines))
+    except Exception as exc:
+        print("[push] Top3 推送失败: %r" % exc, flush=True)
+
+
 ZT_POOL_FUNCS = {
     "zt": "stock_zt_pool_em",
     "dt": "stock_zt_pool_dtgc_em",
@@ -2329,6 +2408,7 @@ def main():
         print("[seal] 封单抓取已开启：每个交易日 9:15/9:20/9:25", flush=True)
         print("[close] 收盘自动任务已开启：每个交易日 15:05（收盘涨幅入库 + 自动生成当日复盘）", flush=True)
         print("[plan] 早盘预案自动生成已开启：每个交易日 8:30", flush=True)
+        print("[push] 交易信号推送已开启：竞价抓取完成后推送 Top3（需配置 Server酱）", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

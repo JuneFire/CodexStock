@@ -5,5 +5,8 @@
     "user": "root",
     "password": "",
     "database": "cn_stock_quant"
+  },
+  "serverchan": {
+    "sendkey": "你的Server酱SendKey（sct.ftqq.com 获取，用于9:30推送竞价Top3）"
   }
 }

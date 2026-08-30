@@ -279,3 +279,29 @@ class TestBuildPlanText(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIsGrabStock(unittest.TestCase):
+    def test_grab_true(self):
+        s = {"ratioToYesterday": 250, "amountStrength": 50, "changePct": 5}
+        self.assertTrue(server._is_grab_stock(s))
+
+    def test_grab_false_ratio_low(self):
+        s = {"ratioToYesterday": 100, "amountStrength": 50, "changePct": 5}
+        self.assertFalse(server._is_grab_stock(s))
+
+    def test_grab_false_strength_low(self):
+        s = {"ratioToYesterday": 250, "amountStrength": 20, "changePct": 5}
+        self.assertFalse(server._is_grab_stock(s))
+
+    def test_grab_false_change_low(self):
+        s = {"ratioToYesterday": 250, "amountStrength": 50, "changePct": 2}
+        self.assertFalse(server._is_grab_stock(s))
+
+    def test_grab_false_none(self):
+        s = {}
+        self.assertFalse(server._is_grab_stock(s))
+
+
+if __name__ == "__main__":
+    unittest.main()
