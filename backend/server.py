@@ -1754,6 +1754,46 @@ def _send_serverchan(title, desc):
         return False
 
 
+def _get_feishu_webhook():
+    """读取 config.json 的 feishu.webhook 或环境变量 FEISHU_WEBHOOK。"""
+    key = os.environ.get("FEISHU_WEBHOOK", "")
+    if key:
+        return key
+    try:
+        with open(os.path.join(PROJECT_ROOT, "config.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        key = (data.get("feishu") or {}).get("webhook") or ""
+    except Exception:
+        key = ""
+    return key
+
+
+def _send_feishu(title, elements):
+    """通过飞书自定义机器人推送消息（interactive 卡片）。elements 为卡片模块列表。"""
+    webhook = _get_feishu_webhook()
+    if not webhook:
+        print("[push] 未配置飞书 webhook，跳过推送", flush=True)
+        return False
+    try:
+        payload = {
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "title": {"tag": "plain_text", "content": title},
+                    "template": "blue",
+                },
+                "elements": elements,
+            },
+        }
+        resp = _session.post(webhook, json=payload, timeout=10)
+        ok = resp.status_code == 200 and resp.json().get("code") == 0
+        print("[push] 飞书推送%s: %s" % ("成功" if ok else "失败", title), flush=True)
+        return ok
+    except Exception as exc:
+        print("[push] 飞书推送失败: %r" % exc, flush=True)
+        return False
+
+
 def _is_grab_stock(s):
     """竞价抢筹：大幅放量(占昨≥200%) + 高金额强度(≥30bp) + 高开(≥3%)。"""
     return (s.get("ratioToYesterday") or 0) >= 200 and \
@@ -1762,7 +1802,7 @@ def _is_grab_stock(s):
 
 
 def _run_top3_push():
-    """竞价抓取完成后推送超预期分最高的 Top3 个股到微信，供手动下单参考。"""
+    """竞价抓取完成后推送超预期分最高的 Top3 个股，供手动下单参考。飞书优先，Server酱回退。"""
     try:
         snapshot = load_latest()
         stocks = snapshot.get("stocks") or []
@@ -1771,11 +1811,32 @@ def _run_top3_push():
             return
         top3 = sorted(stocks, key=lambda s: s.get("score") or 0, reverse=True)[:3]
         date = snapshot.get("date")
+        title = "竞价 Top3 · " + date
+
+        # 飞书卡片：每只股票一个模块，名字加粗放大、抢筹标记
+        feishu_elements = []
+        for i, s in enumerate(top3, 1):
+            grab = _is_grab_stock(s)
+            name = "%d. %s" % (i, s.get("name"))
+            if grab:
+                name += " 🔥抢筹"
+            code_industry = "代码 %s · %s" % (s.get("code"), s.get("industry"))
+            metrics = "竞价金额 %.1f 亿 · 竞价换手 %.2f%% · 竞价涨幅 %+.2f%% · 流通市值 %.0f 亿 · 超预期分 %.1f" % (
+                (s.get("auctionAmount") or 0) / 1e8,
+                s.get("auctionTurnover") or 0,
+                s.get("changePct") or 0,
+                (s.get("floatCap") or 0) / 1e8,
+                s.get("score") or 0)
+            feishu_elements.append({"tag": "markdown", "content": "**%s**\n%s\n%s" % (name, code_industry, metrics)})
+        feishu_elements.append({"tag": "hr"})
+        feishu_elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": "仅供选股参考，非投资建议。手动确认后下单。"}]})
+
+        # 两个渠道都推：飞书（卡片） + Server酱（微信）
+        _send_feishu(title, feishu_elements)
         lines = ["# %s 竞价 Top3（按超预期分，手动下单参考）" % date]
         for i, s in enumerate(top3, 1):
             grab = " 🔥抢筹" if _is_grab_stock(s) else ""
-            lines.append("### %d. %s%s" % (
-                i, s.get("name"), grab))
+            lines.append("### %d. %s%s" % (i, s.get("name"), grab))
             lines.append("代码 %s · %s" % (s.get("code"), s.get("industry")))
             lines.append("竞价金额 %.1f 亿 · 竞价换手 %.2f%% · 竞价涨幅 %+.2f%% · 流通市值 %.0f 亿 · 超预期分 %.1f" % (
                 (s.get("auctionAmount") or 0) / 1e8,
@@ -1786,7 +1847,7 @@ def _run_top3_push():
             if i < len(top3):
                 lines.append("")
         lines.append("\n> 仅供选股参考，非投资建议。手动确认后下单。")
-        _send_serverchan("竞价 Top3 · " + date, "\n\n".join(lines))
+        _send_serverchan(title, "\n\n".join(lines))
     except Exception as exc:
         print("[push] Top3 推送失败: %r" % exc, flush=True)
 

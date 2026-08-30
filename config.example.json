@@ -7,6 +7,9 @@
     "database": "cn_stock_quant"
   },
   "serverchan": {
-    "sendkey": "你的Server酱SendKey（sct.ftqq.com 获取，用于9:30推送竞价Top3）"
+    "sendkey": "你的Server酱SendKey（可选，sct.ftqq.com 获取）"
+  },
+  "feishu": {
+    "webhook": "你的飞书群机器人webhook（可选，open.feishu.cn 获取，推送优先用它）"
   }
 }

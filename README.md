@@ -26,7 +26,7 @@ python backend/server.py
 
 > 竞价抓取提速：9:25 抓竞价时优先读上一交易日已存的"昨日基准"缓存（收盘时写入），命中则跳过逐只拉取日K——抓取从约 3 分钟降到 1 秒内；缓存缺失的股票才逐只实时拉取。
 
-> 交易信号推送：每个交易日 9:30 自动把当日竞价 Top3 个股推送到微信（Server酱），供手动下单参考。配置 `config.json` 的 `serverchan.sendkey`（sct.ftqq.com 获取），或设环境变量 `SERVERCHAN_KEY`。未配置时自动跳过推送。
+> 交易信号推送：竞价抓取完成后立即把当日竞价 Top3（按超预期分）**同时推送到飞书（卡片）和微信（Server酱）**，供手动下单参考。配置 `config.json` 的 `feishu.webhook`（open.feishu.cn 群机器人）和 `serverchan.sendkey`（sct.ftqq.com），或环境变量 `FEISHU_WEBHOOK` / `SERVERCHAN_KEY`。某渠道未配置时自动跳过该渠道。
 
 ## 数据源与降级
 
