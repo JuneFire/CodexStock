@@ -305,8 +305,6 @@
     marketBreadth: $('#marketBreadth'),
     sectorChips: $('#sectorChips'),
     stats: $('#stats'),
-    topMeta: $('#topMeta'),
-    topList: $('#topList'),
     envBanner: $('#envBanner'),
     searchInput: $('#searchInput'),
     watchOnly: $('#watchOnly'),
@@ -429,53 +427,6 @@
     els.envBanner.hidden = false;
   }
 
-  function renderTop10() {
-    renderEnvBanner();
-    const top = [...state.stocks].sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 10);
-    els.topMeta.textContent = state.source + (state.lastUpdate ? ' · ' + state.lastUpdate : '');
-    if (!top.length) {
-      els.topList.innerHTML = '<div class="top-empty">暂无数据</div>';
-      return;
-    }
-    els.topList.innerHTML = top.map((s, idx) => {
-      const rankCls = idx === 0 ? 'r1' : idx === 1 ? 'r2' : idx === 2 ? 'r3' : '';
-      const tierCls = idx === 0 ? ' rank-1' : idx === 1 ? ' rank-2' : idx === 2 ? ' rank-3' : '';
-      const isSel = s.code === state.selectedCode;
-      return `
-        <div class="top-row${tierCls} ${isSel ? 'is-selected' : ''}" data-code="${esc(s.code)}" role="button" tabindex="0">
-          <span class="top-rank ${rankCls}">${idx + 1}</span>
-          <div class="top-identity">
-            <div class="top-name"><span>${esc(s.name)}</span><span class="stock-code">${esc(s.code)}</span></div>
-            <div class="top-sub">${esc(s.industry)} · 竞价价 ${fmtNum(s.price, 2)}</div>
-          </div>
-          <div class="top-metric">
-            <span class="top-metric-label">竞价金额</span>
-            <span class="top-metric-value">${fmtAmountYuan(s.auctionAmount)}</span>
-          </div>
-          <div class="top-metric tm-yamount">
-            <span class="top-metric-label">昨日成交额</span>
-            <span class="top-metric-value">${fmtAmountYuan(s.yesterdayAmount)}</span>
-          </div>
-          <div class="top-metric tm-ratio">
-            <span class="top-metric-label">竞价占昨日</span>
-            <span class="top-metric-value ${colorCls((s.ratioToYesterday || 0) - 10)}">${fmtNum(s.ratioToYesterday, 1)}%</span>
-          </div>
-          <div class="top-metric tm-strength">
-            <span class="top-metric-label">金额强度 bp</span>
-            <span class="top-metric-value">${fmtNum(s.amountStrength, 1)}</span>
-          </div>
-          <div class="top-metric tm-turnover">
-            <span class="top-metric-label">竞价换手</span>
-            <span class="top-metric-value">${fmtNum(s.auctionTurnover, 2)}%</span>
-          </div>
-          <div class="top-score">
-            <span class="score-track"><span class="score-fill ${s.score >= 80 ? 'high' : ''}" style="width:${clamp(s.score || 0, 0, 100)}%"></span></span>
-            <strong>${fmtNum(s.score, 1)}</strong>
-          </div>
-        </div>
-      `;
-    }).join('');
-  }
   function getFiltered() {
     const q = state.search.trim().toLowerCase();
     const out = state.stocks.filter(s => {
@@ -682,7 +633,7 @@
     updateAutoBadge();
     renderMarket();
     renderStats();
-    renderTop10();
+    renderEnvBanner();
     renderSectorChips();
     renderTable();
     renderDetail();
@@ -1096,16 +1047,6 @@
       const tr = e.target.closest('tr[data-code]');
       if (tr) {
         state.selectedCode = tr.getAttribute('data-code');
-        renderTable();
-        renderDetail();
-      }
-    });
-
-    els.topList.addEventListener('click', e => {
-      const row = e.target.closest('.top-row[data-code]');
-      if (row) {
-        state.selectedCode = row.getAttribute('data-code');
-        renderTop10();
         renderTable();
         renderDetail();
       }
