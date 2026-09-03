@@ -106,6 +106,8 @@ SEAL_SAMPLE_TIMES = ["09:15", "09:20", "09:25"]
 SEAL_BATCH_SIZE = 500       # 腾讯批量直连每批股票数
 SEAL_TOP_N = 20             # 全市场封单额取前 N
 
+AUCTION_TOP_N = 50          # 竞价金额抓取前 N 只（腾讯/东财/akshare 统一）
+
 PLAN_FETCH_HM = 8 * 60 + 30  # 早晨 8:30 自动生成当天早盘预案
 PLAN_NEWS_LIMIT = 8          # 预案引用的隔夜快讯条数
 
@@ -307,7 +309,7 @@ def fetch_auction_snapshot():
 
 
 def fetch_auction_snapshot_tencent():
-    """腾讯全市场快照（akshare 封装），取竞价金额前 200；排除北交所。"""
+    """腾讯全市场快照（akshare 封装），取竞价金额前 AUCTION_TOP_N；排除北交所。"""
     if ak is None:
         raise RuntimeError("akshare 未安装")
     import io
@@ -343,7 +345,7 @@ def fetch_auction_snapshot_tencent():
             "totalCap": (to_float(row.get("zsz")) or 0) * TX_CAP_MULT,
         })
     stocks.sort(key=lambda s: (s["auctionAmount"] or 0), reverse=True)
-    return stocks[:200]
+    return stocks[:AUCTION_TOP_N]
 
 
 def _fetch_auction_snapshot_eastmoney():
@@ -380,7 +382,7 @@ def _fetch_auction_snapshot_eastmoney():
             "totalCap": total_cap,            # 元
         })
     stocks.sort(key=lambda s: (s["auctionAmount"] or 0), reverse=True)
-    return stocks[:200]
+    return stocks[:AUCTION_TOP_N]
 
 
 def fetch_auction_snapshot_akshare():
@@ -429,7 +431,7 @@ def fetch_auction_snapshot_akshare():
             "totalCap": total_cap,            # 元
         })
     stocks.sort(key=lambda s: (s["auctionAmount"] or 0), reverse=True)
-    return stocks[:200]
+    return stocks[:AUCTION_TOP_N]
 
 
 def fetch_yesterday_metric(stock, snapshot_date):
@@ -729,7 +731,7 @@ def build_snapshot(auto=False):
 def _build_snapshot(auto=False):
     print("[fetch] 开始抓取竞价数据", flush=True)
     snapshot, source_label = fetch_auction_snapshot()
-    print("[fetch] 竞价金额前 200 已获取", flush=True)
+    print("[fetch] 竞价金额前 %d 已获取" % AUCTION_TOP_N, flush=True)
 
     now = datetime.now()
     snapshot_date = now.strftime("%Y-%m-%d")
@@ -1044,7 +1046,7 @@ def fetch_realtime_baseline(codes):
 
 
 def build_realtime():
-    """基于最新快照的 200 只，返回各自当前涨幅。"""
+    """基于最新快照的全部股票，返回各自当前涨幅。"""
     snapshot = load_latest()
     stocks = snapshot.get("stocks") or []
     codes = [s.get("code") for s in stocks if s.get("code")]
@@ -2132,7 +2134,7 @@ def fetch_review_auto(date_str):
     _set_review_progress(date_str, "红绿盘", 55, "统计涨跌家数…")
     breadth = fetch_spot_breadth(date_str)
     _set_review_progress(date_str, "三一票", 70, "计算竞价三一票…")
-    # 竞价三一票：基于当日竞价 Top200（latest.json），金额/换手/涨幅三项第一命中≥2项
+    # 竞价三一票：基于当日竞价快照（latest.json），金额/换手/涨幅三项第一命中≥2项
     three_pick = []
     try:
         snapshot = load_latest()
