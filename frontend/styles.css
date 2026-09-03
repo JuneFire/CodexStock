@@ -1805,3 +1805,32 @@ input[type="search"] {
   font-size: 14px;
 }
 
+/* 环境标签条 */
+.env-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.env-banner[hidden] { display: none; }
+.env-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.env-label b { font-weight: 700; }
+.env-advice { color: inherit; opacity: 0.9; }
+.env-pos  { background: var(--up-bg);    color: var(--up); }
+.env-pos  .env-dot { background: var(--up); }
+.env-neg  { background: var(--down-bg);  color: var(--down); }
+.env-neg  .env-dot { background: var(--down); }
+.env-warn { background: var(--warn-bg);  color: var(--warn); }
+.env-warn .env-dot { background: var(--warn); }
+.env-ice  { background: var(--accent-bg); color: var(--accent-strong); }
+.env-ice  .env-dot { background: var(--accent); }
+

@@ -272,6 +272,7 @@
   const state = {
     stocks: [],
     market: null,
+    environment: null,
     source: '未加载',
     auto: false,
     validForAuction: true,
@@ -306,6 +307,7 @@
     stats: $('#stats'),
     topMeta: $('#topMeta'),
     topList: $('#topList'),
+    envBanner: $('#envBanner'),
     searchInput: $('#searchInput'),
     watchOnly: $('#watchOnly'),
     resultCount: $('#resultCount'),
@@ -410,7 +412,25 @@
     `;
   }
 
+  function renderEnvBanner() {
+    const env = state.environment;
+    if (!env || !env.state || env.state === 'unknown') {
+      els.envBanner.hidden = true;
+      return;
+    }
+    const toneMap = { pos: 'env-pos', neg: 'env-neg', warn: 'env-warn', ice: 'env-ice' };
+    els.envBanner.className = 'env-banner ' + (toneMap[env.tone] || 'env-warn');
+    const top1 = state.stocks.length && (state.stocks[0] || {}).prevLb >= 2 ? '（第一名是昨日连板股，追高需谨慎）' : '';
+    els.envBanner.innerHTML = `
+      <span class="env-dot"></span>
+      <span class="env-label"><b>${esc(env.label || '')}</b></span>
+      <span class="env-advice">${esc(env.advice || '')}${top1}</span>
+    `;
+    els.envBanner.hidden = false;
+  }
+
   function renderTop10() {
+    renderEnvBanner();
     const top = [...state.stocks].sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 10);
     els.topMeta.textContent = state.source + (state.lastUpdate ? ' · ' + state.lastUpdate : '');
     if (!top.length) {
@@ -704,6 +724,7 @@
   function loadSnapshot(data) {
     state.stocks = (data.stocks || []).map(normalizeStock);
     state.market = data.market || demoMarket(state.stocks);
+    state.environment = data.environment || null;
     state.source = data.source || '腾讯';
     state.auto = !!data.auto;
     state.lastUpdate = data.fetchedAt || data.date || '';
@@ -718,6 +739,7 @@
   function setDemoData() {
     state.stocks = generateDemoData();
     state.market = demoMarket(state.stocks);
+    state.environment = null;
     state.source = '演示数据';
     state.auto = false;
     state.validForAuction = true;
@@ -732,6 +754,7 @@
   function loadImportedData(stocks, sourceLabel) {
     state.stocks = stocks;
     state.market = demoMarket(stocks);
+    state.environment = null;
     state.source = sourceLabel;
     state.auto = false;
     state.validForAuction = true;

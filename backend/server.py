@@ -41,6 +41,7 @@ LATEST_FILE = os.path.join(DATA_DIR, "latest.json")
 HISTORY_DIR = os.path.join(DATA_DIR, "history")
 PLAN_DIR = os.path.join(DATA_DIR, "plan")
 ZTPOOL_DIR = os.path.join(DATA_DIR, "ztpool")  # 每日涨停池连板明细（次日给竞价股标"昨N连板"）
+SENTIMENT_DIR = os.path.join(DATA_DIR, "sentiment")  # 每日情绪摘要（判断情绪周期/环境）
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -800,6 +801,7 @@ def _build_snapshot(auto=False):
         "source": source_label,
         "auto": auto,
         "validForAuction": True,
+        "environment": classify_environment(),  # 情绪周期/环境标签（基于最近交易日收盘摘要）
         "market": {
             "indices": fetch_indices(),
             "up": breadth_up,
@@ -1651,6 +1653,7 @@ def _run_close_review():
             return
         build_review(date, refresh=True)
         save_ztpool_json(date)  # 涨停池落盘本地 JSON，次日竞价标注"昨N连板"（不依赖 MySQL）
+        save_sentiment_json(date)  # 情绪摘要落盘，供环境周期判定（不依赖 MySQL）
         print("[close] 当日复盘已自动生成并入库: %s" % date, flush=True)
     except Exception as exc:
         print("[close] 自动生成复盘失败: %r" % exc, flush=True)
@@ -1978,6 +1981,140 @@ def load_prev_lb_map():
     except Exception:
         return {}
     return {r["code"]: (r.get("lb") or 0) for r in data.get("rows") or [] if r.get("code")}
+
+
+def _ztpool_rows(date_str):
+    """读某日已落盘涨停池的 rows；无则返回 []。"""
+    path = os.path.join(ZTPOOL_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            return (json.load(f).get("rows")) or []
+    except Exception:
+        return []
+
+
+def save_sentiment_json(date_str):
+    """收盘后落盘当日情绪摘要到 data/sentiment/<日期>.json。
+
+    字段：涨停数 zt、跌停数 dt、炸板数 zb、最高连板 maxTier、上证收盘/涨跌。
+    涨停数据复用已落盘的 ztpool（不重复抓 zt 池），dt/zb 池需现抓。
+    失败不抛，只打日志。
+    """
+    rows = _ztpool_rows(date_str)
+    zt_count = len(rows)
+    max_tier = max([r.get("lb") or 0 for r in rows]) if rows else 0
+    dt_count = zb_count = 0
+    try:
+        df = _pool_em("stock_zt_pool_dtgc_em", date_str)
+        dt_count = len(df)
+    except Exception:
+        pass
+    try:
+        df = _pool_em("stock_zt_pool_zbgc_em", date_str)
+        zb_count = len(df)
+    except Exception:
+        pass
+    summary = {
+        "date": date_str,
+        "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "zt": zt_count,
+        "dt": dt_count,
+        "zb": zb_count,
+        "maxTier": max_tier,
+    }
+    try:
+        os.makedirs(SENTIMENT_DIR, exist_ok=True)
+        with open(os.path.join(SENTIMENT_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False)
+        print("[sentiment] 情绪摘要已落盘: %s zt=%d dt=%d zb=%d 高板=%d" % (
+            date_str, zt_count, dt_count, zb_count, max_tier), flush=True)
+        return True
+    except Exception as exc:
+        print("[sentiment] %s 落盘失败: %r" % (date_str, exc), flush=True)
+        return False
+
+
+def load_sentiment_history(limit=10):
+    """读最近 N 日情绪摘要，按日期升序返回 [{date, zt, dt, zb, maxTier}]。"""
+    if not os.path.isdir(SENTIMENT_DIR):
+        return []
+    try:
+        names = sorted(n for n in os.listdir(SENTIMENT_DIR) if n.endswith(".json"))
+    except OSError:
+        return []
+    out = []
+    for name in names[-limit:]:
+        try:
+            with open(os.path.join(SENTIMENT_DIR, name), encoding="utf-8") as f:
+                d = json.load(f)
+            out.append({
+                "date": d.get("date") or name[:-5],
+                "zt": int(d.get("zt") or 0),
+                "dt": int(d.get("dt") or 0),
+                "zb": int(d.get("zb") or 0),
+                "maxTier": int(d.get("maxTier") or 0),
+            })
+        except Exception:
+            continue
+    return out
+
+
+def classify_environment():
+    """读最近情绪摘要，判断当前情绪周期位置，返回环境标签 dict。
+
+    返回 {"state", "label", "tone", "advice", "recent"}：
+      - state: 上升(rising) / 分歧(divergence) / 退潮(receding) / 冰点(icepoint)
+      - tone: 用于前端配色 pos/neg/warn/ice
+    规则（基于最近交易日收盘摘要，竞价时尚未有当日情绪）：
+      - 情绪连升且高板抬升 → 上升期（适合竞价，晋级概率大）
+      - 涨停收缩/炸板高 → 退潮（谨慎，晋级概率小）
+      - 连续多日退潮至涨停极低 → 冰点（可能冰点产龙，关注反转）
+      - 其余 → 分歧（中性，看题材）
+    """
+    hist = load_sentiment_history(8)
+    if not hist:
+        return {"state": "unknown", "label": "暂无情绪数据", "tone": "flat",
+                "advice": "跑几日收盘任务后自动生成", "recent": []}
+    last = hist[-1]
+    zt, zb, mt = last["zt"], last["zb"], last["maxTier"]
+    prev = hist[-2] if len(hist) >= 2 else None
+    prev_zt = prev["zt"] if prev else zt
+    # 连续退潮天数：从最近往前数 zt 递减的连续天数
+    recede_days = 0
+    for i in range(len(hist) - 1, 0, -1):
+        if hist[i]["zt"] < hist[i - 1]["zt"]:
+            recede_days += 1
+        else:
+            break
+    # 当日相对前日：明显放量(升) / 明显收缩(降)
+    zt_drop = (prev_zt - zt) / max(prev_zt, 1) * 100 if prev else 0  # 降幅%
+
+    if zt <= 25 and recede_days >= 2:
+        state = "冰点"
+        tone = "ice"
+        label = "冰点期（连续%d天·涨停仅%d家）" % (recede_days + 1, zt)
+        advice = "冰点易产龙：竞价第一若低位启动可重点关注，情绪反转点临近"
+    elif zt >= 55 and mt >= 4 and zt >= prev_zt:
+        state = "上升"
+        tone = "pos"
+        label = "上升期（涨停%d家·最高%d板·情绪升温）" % (zt, mt)
+        advice = "适合竞价：竞价第一晋级概率大，可积极关注"
+    elif recede_days >= 1 and (zt_drop >= 15 or zb >= 20 or zt <= 40):
+        state = "退潮"
+        tone = "neg"
+        label = "退潮期（涨停%d家↓%d%%·炸板%d家）" % (zt, round(zt_drop), zb)
+        advice = "谨慎：竞价第一晋级概率小，高位追高易大面，建议轻仓或观望"
+    else:
+        state = "分歧"
+        tone = "warn"
+        label = "分歧期（涨停%d家·炸板%d家）" % (zt, zb)
+        advice = "中性：竞价第一看题材持续性，关注板块共振而非孤军"
+
+    return {"state": state, "label": label, "tone": tone, "advice": advice,
+            "recent": [{"date": h["date"][5:], "zt": h["zt"], "maxTier": h["maxTier"]} for h in hist[-5:]]}
+
 
 
 
