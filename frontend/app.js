@@ -280,7 +280,6 @@
     search: '',
     sectors: [],
     watchOnly: false,
-    top60Only: true,
     watchlist: loadWatchlist(),
     sort: { key: 'score', dir: 'desc' },
     realtime: {},        // code -> 当前涨幅%
@@ -309,7 +308,6 @@
     topList: $('#topList'),
     searchInput: $('#searchInput'),
     watchOnly: $('#watchOnly'),
-    top60Only: $('#top60Only'),
     resultCount: $('#resultCount'),
     stockBody: $('#stockBody'),
     emptyState: $('#emptyState'),
@@ -472,11 +470,6 @@
     return sortStocks(out);
   }
 
-  function top60Limit(list) {
-    if (!state.top60Only) return list;
-    return list.slice(0, 60);
-  }
-
   function sortStocks(list) {
     const { key, dir } = state.sort;
     const sign = dir === 'desc' ? -1 : 1;
@@ -513,10 +506,8 @@
   }
 
   function renderTable() {
-    const allRows = getFiltered();
-    const rows = top60Limit(allRows);
-    const total = state.top60Only ? Math.min(allRows.length, 60) : allRows.length;
-    els.resultCount.textContent = `${total} / ${state.stocks.length}`;
+    const rows = getFiltered();
+    els.resultCount.textContent = `${rows.length} / ${state.stocks.length}`;
     els.emptyState.hidden = rows.length > 0;
     if (!rows.length) {
       els.stockBody.innerHTML = '';
@@ -541,6 +532,7 @@
             <span class="stock-name">${esc(s.name)}${grab ? '<span class="grab-badge" title="竞价抢筹">抢筹</span>' : ''}</span>
             <span class="stock-sector">${esc(s.industry)}</span>
           </td>
+          <td class="num col-prevlb ${s.prevLb >= 2 ? 'lb-high' : s.prevLb === 1 ? 'lb-one' : ''}">${s.prevLb >= 1 ? (s.prevLb + '板') : '—'}</td>
           <td class="num">${fmtNum(s.price, 2)}</td>
           <td class="num ${colorCls(s.changePct)}">${fmtPct(s.changePct)}</td>
           <td class="num col-realtime ${rtCls(state.realtime[s.code])}">${state.realtime[s.code] != null ? fmtPct(state.realtime[s.code]) : '—'}</td>
@@ -696,6 +688,7 @@
       yesterdayAmount: s.yesterdayAmount == null ? null : Number(s.yesterdayAmount),
       yesterdayTurnover: s.yesterdayTurnover == null ? null : Number(s.yesterdayTurnover),
       yesterdayClose: s.yesterdayClose == null ? null : Number(s.yesterdayClose),
+      prevLb: s.prevLb == null ? 0 : Number(s.prevLb),
       fetchedAt: s.fetchedAt || ''
     });
   }
@@ -1058,11 +1051,6 @@
       state.watchOnly = els.watchOnly.checked;
       renderTable();
       renderStats();
-    });
-
-    els.top60Only.addEventListener('change', () => {
-      state.top60Only = els.top60Only.checked;
-      renderTable();
     });
 
     const thead = $('thead', $('#stockTable'));

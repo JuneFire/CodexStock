@@ -40,6 +40,7 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 LATEST_FILE = os.path.join(DATA_DIR, "latest.json")
 HISTORY_DIR = os.path.join(DATA_DIR, "history")
 PLAN_DIR = os.path.join(DATA_DIR, "plan")
+ZTPOOL_DIR = os.path.join(DATA_DIR, "ztpool")  # 每日涨停池连板明细（次日给竞价股标"昨N连板"）
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -776,6 +777,10 @@ def _build_snapshot(auto=False):
             s["industry"] = sector_map.get(s["code"], "其他")
 
     stocks = [compute_metrics(s, yesterday_map.get(s["code"])) for s in snapshot]
+    # 标注"昨N连板"：读最近一个交易日已落盘的涨停池，命中则补 prevLb（0=未涨停）
+    prev_lb = load_prev_lb_map()
+    for s in stocks:
+        s["prevLb"] = prev_lb.get(s.get("code"), 0)
     stocks.sort(key=lambda s: (s.get("score") or 0), reverse=True)
     for idx, stock in enumerate(stocks, start=1):
         stock["rank"] = idx
@@ -1645,6 +1650,7 @@ def _run_close_review():
             print("[close] 无竞价快照日期，跳过复盘生成", flush=True)
             return
         build_review(date, refresh=True)
+        save_ztpool_json(date)  # 涨停池落盘本地 JSON，次日竞价标注"昨N连板"（不依赖 MySQL）
         print("[close] 当日复盘已自动生成并入库: %s" % date, flush=True)
     except Exception as exc:
         print("[close] 自动生成复盘失败: %r" % exc, flush=True)
@@ -1913,6 +1919,66 @@ def fetch_zt_pools(date_str):
             print("[review] %s 池抓取失败: %r" % (key, exc), flush=True)
             out[key] = []
     return out
+
+
+def save_ztpool_json(date_str):
+    """收盘后把当日涨停池连板明细落盘到 data/ztpool/<日期>.json，供次日竞价标注。
+
+    内容：当日涨停股（zt 池）逐股 code/name/industry/ztCount/lb（连续板数）。
+    失败不抛，只打日志。
+    """
+    try:
+        df = _pool_em("stock_zt_pool_em", date_str)
+    except Exception as exc:
+        print("[ztpool] %s 当日涨停池抓取失败: %r" % (date_str, exc), flush=True)
+        return False
+    rows = []
+    for _, r in df.iterrows():
+        code = str(_row_val(r, ("代码",)) or "").zfill(6)
+        if not code:
+            continue
+        zt_count = str(_row_val(r, ("涨停统计",)) or "").strip()
+        lb = _zt_count_from_stats(zt_count)
+        rows.append({
+            "code": code,
+            "name": str(_row_val(r, ("名称",)) or "").strip(),
+            "industry": str(_row_val(r, ("所属行业",)) or "").strip(),
+            "ztCount": zt_count,
+            "lb": lb,
+            "sealAmount": to_float(_row_val(r, ("封板资金",))),
+        })
+    try:
+        os.makedirs(ZTPOOL_DIR, exist_ok=True)
+        with open(os.path.join(ZTPOOL_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
+            json.dump({"date": date_str, "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                       "ztCount": len(rows), "rows": rows}, f, ensure_ascii=False)
+        print("[ztpool] 当日涨停池已落盘: %s %d 只" % (date_str, len(rows)), flush=True)
+        return True
+    except Exception as exc:
+        print("[ztpool] %s 落盘失败: %r" % (date_str, exc), flush=True)
+        return False
+
+
+def load_prev_lb_map():
+    """读最近一个已落盘的涨停池，返回 {6位代码: 连板数}。
+
+    次日竞价时给竞价股标注"昨N连板"。找不到返回 {}。
+    """
+    if not os.path.isdir(ZTPOOL_DIR):
+        return {}
+    try:
+        names = sorted(n for n in os.listdir(ZTPOOL_DIR) if n.endswith(".json"))
+    except OSError:
+        return {}
+    if not names:
+        return {}
+    try:
+        with open(os.path.join(ZTPOOL_DIR, names[-1]), encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    return {r["code"]: (r.get("lb") or 0) for r in data.get("rows") or [] if r.get("code")}
+
 
 
 def _zt_count_from_stats(zt_stat):

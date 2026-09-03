@@ -1693,6 +1693,19 @@ input[type="search"] {
   white-space: nowrap;
 }
 
+/* 昨连板列：高位连板(>=2)青色高亮，首板(1)灰 */
+.col-prevlb {
+  min-width: 48px;
+}
+.lb-high {
+  color: var(--accent);
+  font-weight: 700;
+}
+.lb-one {
+  color: var(--text-2);
+  font-weight: 600;
+}
+
 /* ---------- 早盘预案 ---------- */
 .plan-main {
   width: 100%;
