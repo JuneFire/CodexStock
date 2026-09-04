@@ -1654,9 +1654,31 @@ def _run_close_review():
         build_review(date, refresh=True)
         save_ztpool_json(date)  # 涨停池落盘本地 JSON，次日竞价标注"昨N连板"（不依赖 MySQL）
         save_sentiment_json(date)  # 情绪摘要落盘，供环境周期判定（不依赖 MySQL）
+        _run_preselect_node(date)  # 节点预选票：冰点/退潮日筛候选，并入 sentiment JSON
         print("[close] 当日复盘已自动生成并入库: %s" % date, flush=True)
     except Exception as exc:
         print("[close] 自动生成复盘失败: %r" % exc, flush=True)
+
+
+def _run_preselect_node(date_str):
+    """计算当日节点预选票，写回 sentiment JSON 的 preselect 字段。失败不抛。"""
+    try:
+        result = compute_preselect_node(date_str)
+        path = os.path.join(SENTIMENT_DIR, date_str + ".json")
+        if not os.path.isfile(path):
+            return
+        with open(path, encoding="utf-8") as f:
+            summary = json.load(f)
+        summary["preselect"] = result
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False)
+        if result.get("isNode"):
+            print("[preselect] %s 节点=%s 预选票 %d 只" % (
+                date_str, result.get("node"), len(result.get("candidates") or [])), flush=True)
+        else:
+            print("[preselect] %s 非节点日(%s)，不筛" % (date_str, result.get("node")), flush=True)
+    except Exception as exc:
+        print("[preselect] %s 计算失败: %r" % (date_str, exc), flush=True)
 
 
 def close_fetch_loop(enabled=True):
@@ -1907,6 +1929,7 @@ def _stock_from_pool_row(row):
         "sealTime": str(_row_val(row, ("首次封板时间",)) or "").strip(),
         "ztCount": str(_row_val(row, ("涨停统计",)) or "").strip(),
         "lianban": _row_val(row, ("连板数",)),
+        "prevLb": _row_val(row, ("昨日连板数",)),  # 昨日涨停池才含此列
         "reason": str(_row_val(row, ("入选理由",)) or "").strip(),
     }
 
@@ -2276,6 +2299,122 @@ def classify_environment():
         recent.append(item)
     return {"state": state, "label": label, "tone": tone, "advice": advice,
             "recent": recent, "sectors": top_sectors}
+
+
+# ---------- 情绪节点预选票 ----------
+
+def _load_day_sentiment(date_str):
+    """读某日 sentiment JSON。无则返回 None。"""
+    path = os.path.join(SENTIMENT_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def compute_preselect_node(date_str, sentiment=None):
+    """判断 date_str 是否情绪节点日（冰点/退潮），若是则从当日涨停股筛预选票。
+
+    四维打分（各 25 分）：
+      1 逆势封板   当日绿盘>红盘（普跌日）仍涨停
+      2 板块共振   该股行业当日涨停家数 >=2（非孤军）
+      3 梯队卡位   该股连板数 = 当日最高板（龙头位）或次高
+      4 低位启动   昨日未涨停（prevLb 为空/0）
+    额外：封单额 Top 加分 +10。
+
+    返回 {"isNode", "node", "candidates", "env"}。非节点日 isNode=False。
+    """
+    if sentiment is None:
+        sentiment = _load_day_sentiment(date_str)
+    env = classify_environment()
+    node = env.get("state")
+    if node not in ("冰点", "退潮"):
+        return {"isNode": False, "node": node, "candidates": [], "env": env}
+
+    rows = _ztpool_rows(date_str)
+    if not rows:
+        return {"isNode": True, "node": node, "candidates": [], "env": env,
+                "reason": "当日无涨停池数据"}
+
+    # 逆势门控：普跌日 = 绿盘 > 红盘
+    red = (sentiment or {}).get("red")
+    green = (sentiment or {}).get("green")
+    is_weak_day = (red is not None and green is not None) and green > red
+
+    # 板块涨停家数聚合 + 封单排名
+    sector_zt = {}
+    for r in rows:
+        ind = str(r.get("industry") or "其他").strip() or "其他"
+        sector_zt[ind] = sector_zt.get(ind, 0) + 1
+    seal_sorted = sorted(rows, key=lambda x: (x.get("sealAmount") or 0), reverse=True)
+    seal_top_codes = {s.get("code") for s in seal_sorted[:max(1, len(rows) // 4)]}
+
+    # 昨涨停 map（prevLb 已在 prev 池提取时保留；此处从 prev 池现抓对齐）
+    prev_lb = {}
+    try:
+        pools = fetch_zt_pools(date_str)
+        for s in pools.get("prev") or []:
+            code = s.get("code")
+            p = s.get("prevLb")
+            if code:
+                prev_lb[code] = int(p) if p not in (None, "") else None
+    except Exception:
+        pass
+
+    # 最高/次高板（判断梯队卡位）
+    lbs = sorted({r.get("lb") or 0 for r in rows}, reverse=True)
+    top_lb = lbs[0] if lbs else 0
+    second_lb = lbs[1] if len(lbs) > 1 else 0
+
+    candidates = []
+    for r in rows:
+        code = r.get("code")
+        if not code:
+            continue
+        lb = r.get("lb") or 0
+        ind = str(r.get("industry") or "其他").strip() or "其他"
+        score = 0
+        hits = []
+        # 1 逆势封板：普跌日所有涨停股都算逆势（门控 + 该股在池）
+        if is_weak_day:
+            score += 25
+            hits.append("逆势")
+        # 2 板块共振
+        if sector_zt.get(ind, 0) >= 2:
+            score += 25
+            hits.append("板块")
+        # 3 梯队卡位：最高板 或 (次高板 且 较高位)
+        if lb == top_lb:
+            score += 25
+            hits.append("龙头位")
+        elif lb == second_lb and second_lb > 0:
+            score += 25
+            hits.append("卡位")
+        # 4 低位启动：昨日未涨停（不在 prev_lb 或 prevLb 为 0/None）
+        if code not in prev_lb or not prev_lb.get(code):
+            score += 25
+            hits.append("低位")
+        # 封单加分
+        if code in seal_top_codes:
+            score += 10
+            hits.append("大封单")
+        candidates.append({
+            "code": code,
+            "name": r.get("name") or "",
+            "industry": ind,
+            "lb": lb,
+            "prevLb": prev_lb.get(code),
+            "sealAmount": r.get("sealAmount"),
+            "score": score,
+            "hits": hits,
+        })
+    candidates.sort(key=lambda x: (x.get("score") or 0), reverse=True)
+    picked = [c for c in candidates if (c.get("score") or 0) >= 40][:5]
+    return {"isNode": True, "node": node, "candidates": picked,
+            "env": {"state": env.get("state"), "label": env.get("label")}}
 
 
 
@@ -2687,6 +2826,19 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "缺少 date 参数"}, status=400)
                 return
             self.send_json(load_plan(date))
+            return
+        if parsed.path == "/api/preselect":
+            date = (parse_qs(parsed.query).get("date") or [""])[0]
+            if not date:
+                self.send_json({"ok": False, "error": "缺少 date 参数"}, status=400)
+                return
+            sent = _load_day_sentiment(date)
+            preselect = (sent or {}).get("preselect")
+            if not preselect:
+                self.send_json({"ok": True, "date": date, "isNode": False,
+                                "candidates": [], "reason": "该日无节点预选票记录"})
+            else:
+                self.send_json({"ok": True, "date": date, **preselect})
             return
         if parsed.path == "/api/history/stock":
             code = (parse_qs(parsed.query).get("code") or [""])[0]

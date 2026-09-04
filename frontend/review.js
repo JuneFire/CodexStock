@@ -20,6 +20,14 @@
     return Number(v).toFixed(d == null ? 2 : d);
   }
 
+  function fmtAmountYuan(v) {
+    if (v == null || !Number.isFinite(Number(v))) return '—';
+    const n = Number(v);
+    if (n >= 1e8) return (n / 1e8).toFixed(2) + '亿';
+    if (n >= 1e4) return Math.round(n / 1e4) + '万';
+    return Math.round(n) + '元';
+  }
+
   function fmtPoints(v) {
     if (v == null || !Number.isFinite(Number(v))) return '—';
     const n = Number(v);
@@ -62,6 +70,10 @@
     darkList: $('#darkList'),
     historyCount: $('#historyCount'),
     reviewDateList: $('#reviewDateList'),
+    preselectSection: $('#preselectSection'),
+    preselectMeta: $('#preselectMeta'),
+    preselectBody: $('#preselectBody'),
+    preselectEmpty: $('#preselectEmpty'),
     fetchProgress: $('#fetchProgress'),
     fetchProgressBar: $('#fetchProgressBar'),
     fetchProgressText: $('#fetchProgressText'),
@@ -266,6 +278,43 @@
     els.reviewDate.textContent = state.date;
     const d = state.data;
     els.reviewStatus.textContent = d.cached ? '已缓存 · ' + (d.fetchedAt || '') : (d.fetchedAt ? '抓取于 ' + (d.fetchedAt || '') : '未抓取');
+    loadPreselect(state.date);
+    refreshIcons();
+  }
+
+  // 情绪节点预选票：读某日 sentiment JSON 里的 preselect 字段
+  async function loadPreselect(date) {
+    try {
+      const res = await fetch('/api/preselect?date=' + encodeURIComponent(date));
+      let data = null;
+      try { data = await res.json(); } catch (e) { data = null; }
+      renderPreselect(data);
+    } catch (err) {
+      renderPreselect(null);
+    }
+  }
+
+  function renderPreselect(data) {
+    if (!data || !data.ok || !data.isNode) {
+      els.preselectSection.hidden = true;
+      return;
+    }
+    els.preselectSection.hidden = false;
+    const cands = data.candidates || [];
+    els.preselectMeta.textContent = (data.node || '') + '节点 · ' + data.date;
+    els.preselectEmpty.hidden = cands.length > 0;
+    els.preselectBody.innerHTML = cands.map(c => `
+      <tr>
+        <td class="stock-code">${esc(c.code)}</td>
+        <td><span class="stock-name">${esc(c.name)}</span></td>
+        <td>${esc(c.industry || '—')}</td>
+        <td class="num">${c.lb || 0}板</td>
+        <td class="num ${(c.prevLb || 0) >= 1 ? 'lb-high' : ''}">${(c.prevLb || 0) >= 1 ? c.prevLb + '板' : '—'}</td>
+        <td class="num">${c.sealAmount != null ? fmtAmountYuan(c.sealAmount) : '—'}</td>
+        <td>${(c.hits || []).map(h => `<span class="tag">${esc(h)}</span>`).join('')}</td>
+        <td class="num"><strong>${c.score || 0}</strong></td>
+      </tr>
+    `).join('');
     refreshIcons();
   }
 
