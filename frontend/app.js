@@ -532,9 +532,10 @@
   function renderSortArrows() {
     $$('th.sortable', $('#stockTable')).forEach(th => {
       const key = th.getAttribute('data-key');
-      let arrow = '';
-      if (key === state.sort.key) arrow = state.sort.dir === 'desc' ? '↓' : '↑';
-      th.innerHTML = th.textContent.trim() + `<span class="sort-icon">${arrow}</span>`;
+      const label = th.getAttribute('data-label') || th.textContent.replace(/[↓↑]$/, '').trim();
+      th.setAttribute('data-label', label);
+      const arrow = (key === state.sort.key) ? (state.sort.dir === 'desc' ? '↓' : '↑') : '';
+      th.innerHTML = label + `<span class="sort-icon">${arrow}</span>`;
     });
   }
 
