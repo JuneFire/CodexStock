@@ -1995,16 +1995,53 @@ def _ztpool_rows(date_str):
         return []
 
 
+def _fetch_market_activity():
+    """东财市场活跃度：红盘/绿盘/涨停(含一字)/真实涨停(剔一字)。失败返回 {}。"""
+    try:
+        df = _pool_em_like("stock_market_activity_legu")
+        m = {}
+        for _, r in df.iterrows():
+            m[str(r.get("item"))] = r.get("value")
+        return m
+    except Exception:
+        return {}
+
+
+def _pool_em_like(func_name):
+    """调任意 akshare 东财接口（无日期参数），屏蔽 tqdm。"""
+    if ak is None:
+        raise RuntimeError("akshare 未安装")
+    import io
+    import contextlib
+    with contextlib.redirect_stderr(io.StringIO()):
+        df = getattr(ak, func_name)()
+    if df is None or df.empty:
+        raise RuntimeError("%s 无数据" % func_name)
+    return df
+
+
 def save_sentiment_json(date_str):
     """收盘后落盘当日情绪摘要到 data/sentiment/<日期>.json。
 
-    字段：涨停数 zt、跌停数 dt、炸板数 zb、最高连板 maxTier、上证收盘/涨跌。
-    涨停数据复用已落盘的 ztpool（不重复抓 zt 池），dt/zb 池需现抓。
+    字段对齐"市场涨跌监控表"口径：
+      red/green       红盘/绿盘家数
+      zt              实际涨停（含一字）
+      zt_real         非一字涨停（东财真实涨停口径）
+      dt              跌停
+      zb              炸板
+      lb_total/lb2/lb3/lb3p  连板总数 / 二连板 / 三连板 / 三板以上
+      maxTier         最高连板
+    涨停/连板数据复用已落盘的 ztpool；红绿/真实涨停来自 stock_market_activity_legu。
     失败不抛，只打日志。
     """
     rows = _ztpool_rows(date_str)
     zt_count = len(rows)
-    max_tier = max([r.get("lb") or 0 for r in rows]) if rows else 0
+    lb_list = [r.get("lb") or 0 for r in rows]
+    max_tier = max(lb_list) if lb_list else 0
+    lb_total = sum(1 for n in lb_list if n >= 2)
+    lb2 = sum(1 for n in lb_list if n == 2)
+    lb3 = sum(1 for n in lb_list if n == 3)
+    lb3p = sum(1 for n in lb_list if n >= 4)
     dt_count = zb_count = 0
     try:
         df = _pool_em("stock_zt_pool_dtgc_em", date_str)
@@ -2016,20 +2053,74 @@ def save_sentiment_json(date_str):
         zb_count = len(df)
     except Exception:
         pass
+    # 红绿/真实涨停：东财活跃度（收盘后给当日数据）
+    red = green = zt_real = None
+    try:
+        act = _fetch_market_activity()
+        def _num_of(item):
+            try:
+                return int(float(act.get(item) or 0))
+            except (TypeError, ValueError):
+                return None
+        red = _num_of("上涨")
+        green = _num_of("下跌")
+        zt_real = _num_of("真实涨停")
+    except Exception:
+        pass
+    # 板块强度：涨停池按行业聚合（涨停家数降序），含最大封单个股
+    sector_stat = {}
+    for r in rows:
+        ind = str(r.get("industry") or "其他").strip()
+        if not ind:
+            ind = "其他"
+        item = sector_stat.setdefault(ind, {"name": ind, "zt": 0, "lb": 0})
+        item["zt"] += 1
+        item["lb"] = max(item["lb"], r.get("lb") or 0)
+        seal = r.get("sealAmount") or 0
+        if "maxSeal" not in item or seal > (item.get("maxSealSeal") or 0):
+            item["maxSealCode"] = r.get("code")
+            item["maxSealName"] = r.get("name")
+            item["maxSealSeal"] = seal
+    top_sectors = sorted(sector_stat.values(), key=lambda x: (x["zt"], x["lb"]), reverse=True)[:5]
+    for s in top_sectors:
+        s.pop("maxSealSeal", None)
+        s.pop("maxSealCode", None)
+    # 两市量能（亿）：复用指数日K的上证+深成合计
+    market_amount = None
+    try:
+        idx = fetch_indices_kline(date_str)
+        for i in idx:
+            if i.get("marketAmountYi") is not None:
+                market_amount = i["marketAmountYi"]
+                break
+    except Exception:
+        pass
     summary = {
         "date": date_str,
         "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "zt": zt_count,
+        "zt_real": zt_real,
         "dt": dt_count,
         "zb": zb_count,
+        "red": red,
+        "green": green,
+        "lb_total": lb_total,
+        "lb2": lb2,
+        "lb3": lb3,
+        "lb3p": lb3p,
         "maxTier": max_tier,
+        "marketAmountYi": market_amount,     # 沪深两市合计成交额（亿）
+        "topSectors": top_sectors,           # 强势板块 Top5（含涨停家数/最高板/最大封单）
     }
     try:
         os.makedirs(SENTIMENT_DIR, exist_ok=True)
         with open(os.path.join(SENTIMENT_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False)
-        print("[sentiment] 情绪摘要已落盘: %s zt=%d dt=%d zb=%d 高板=%d" % (
-            date_str, zt_count, dt_count, zb_count, max_tier), flush=True)
+        sector_txt = "、".join("%s%d" % (s["name"], s["zt"]) for s in top_sectors) or "无"
+        print("[sentiment] 情绪摘要已落盘: %s 涨停%d(非一字%d) 红%d绿%d 炸板%d 连板%d[2板%d/3板%d/3板+%d] 高板%d 两市%d亿 板块[%s]" % (
+            date_str, zt_count, zt_real or 0, red or 0, green or 0,
+            zb_count, lb_total, lb2, lb3, lb3p, max_tier,
+            int(market_amount) if market_amount else 0, sector_txt), flush=True)
         return True
     except Exception as exc:
         print("[sentiment] %s 落盘失败: %r" % (date_str, exc), flush=True)
@@ -2037,7 +2128,7 @@ def save_sentiment_json(date_str):
 
 
 def load_sentiment_history(limit=10):
-    """读最近 N 日情绪摘要，按日期升序返回 [{date, zt, dt, zb, maxTier}]。"""
+    """读最近 N 日情绪摘要，按日期升序返回。字段对齐监控表口径。"""
     if not os.path.isdir(SENTIMENT_DIR):
         return []
     try:
@@ -2049,12 +2140,26 @@ def load_sentiment_history(limit=10):
         try:
             with open(os.path.join(SENTIMENT_DIR, name), encoding="utf-8") as f:
                 d = json.load(f)
+            def _n(k):
+                try:
+                    return int(d.get(k) or 0)
+                except (TypeError, ValueError):
+                    return 0
             out.append({
                 "date": d.get("date") or name[:-5],
-                "zt": int(d.get("zt") or 0),
-                "dt": int(d.get("dt") or 0),
-                "zb": int(d.get("zb") or 0),
-                "maxTier": int(d.get("maxTier") or 0),
+                "zt": _n("zt"),
+                "zt_real": _n("zt_real"),
+                "dt": _n("dt"),
+                "zb": _n("zb"),
+                "red": _n("red"),
+                "green": _n("green"),
+                "lb_total": _n("lb_total"),
+                "lb2": _n("lb2"),
+                "lb3": _n("lb3"),
+                "lb3p": _n("lb3p"),
+                "maxTier": _n("maxTier"),
+                "marketAmountYi": (lambda v: float(v) if v else None)(d.get("marketAmountYi")),
+                "topSectors": d.get("topSectors") or [],
             })
         except Exception:
             continue
@@ -2065,55 +2170,112 @@ def classify_environment():
     """读最近情绪摘要，判断当前情绪周期位置，返回环境标签 dict。
 
     返回 {"state", "label", "tone", "advice", "recent"}：
-      - state: 上升(rising) / 分歧(divergence) / 退潮(receding) / 冰点(icepoint)
-      - tone: 用于前端配色 pos/neg/warn/ice
-    规则（基于最近交易日收盘摘要，竞价时尚未有当日情绪）：
-      - 情绪连升且高板抬升 → 上升期（适合竞价，晋级概率大）
-      - 涨停收缩/炸板高 → 退潮（谨慎，晋级概率小）
-      - 连续多日退潮至涨停极低 → 冰点（可能冰点产龙，关注反转）
-      - 其余 → 分歧（中性，看题材）
+      - state: 上升 / 分歧 / 退潮 / 冰点
+      - tone: pos/neg/warn/ice
+    判定对齐"市场涨跌监控表"口径，纳入：
+      - 红绿背离（涨停多但红盘少 = 虚涨）
+      - 连板梯队结构（lb2/lb3/lb3p：梯队塌方 vs 健康递进）
+      - 非一字涨停占比（一字过多 = 缩量难持续）
+    基于最近交易日收盘摘要（竞价 9:25 当日情绪未定）。
     """
     hist = load_sentiment_history(8)
     if not hist:
         return {"state": "unknown", "label": "暂无情绪数据", "tone": "flat",
                 "advice": "跑几日收盘任务后自动生成", "recent": []}
     last = hist[-1]
-    zt, zb, mt = last["zt"], last["zb"], last["maxTier"]
+    zt = last.get("zt", 0)
+    zb = last.get("zb", 0)
+    mt = last.get("maxTier", 0)
+    red = last.get("red")
+    green = last.get("green")
+    zt_real = last.get("zt_real")
+    lb2, lb3, lb3p = last.get("lb2", 0), last.get("lb3", 0), last.get("lb3p", 0)
+    lb_total = last.get("lb_total", 0)
+    amount_yi = last.get("marketAmountYi")
+    top_sectors = last.get("topSectors") or []
     prev = hist[-2] if len(hist) >= 2 else None
-    prev_zt = prev["zt"] if prev else zt
-    # 连续退潮天数：从最近往前数 zt 递减的连续天数
+    prev_zt = prev.get("zt", zt) if prev else zt
+    prev_amount = prev.get("marketAmountYi") if prev else None
+    # 量能变化：相对昨日增减
+    amount_txt = ""
+    if amount_yi is not None:
+        amount_txt = "两市%d亿" % int(amount_yi)
+        if prev_amount and prev_amount > 0:
+            amt_delta = (amount_yi - prev_amount) / prev_amount * 100
+            if abs(amt_delta) >= 5:
+                flag = "放量" if amt_delta > 0 else "缩量"
+                amount_txt += "·%s%+.0f%%" % (flag, amt_delta)
+
+    # 连续退潮天数
     recede_days = 0
     for i in range(len(hist) - 1, 0, -1):
-        if hist[i]["zt"] < hist[i - 1]["zt"]:
+        if hist[i].get("zt", 0) < hist[i - 1].get("zt", 0):
             recede_days += 1
         else:
             break
-    # 当日相对前日：明显放量(升) / 明显收缩(降)
-    zt_drop = (prev_zt - zt) / max(prev_zt, 1) * 100 if prev else 0  # 降幅%
+    zt_drop = (prev_zt - zt) / max(prev_zt, 1) * 100 if prev else 0
+    # 红绿背离：红盘偏少而涨停高 → 虚涨（普跌市场里涨停是少数抱团）
+    diverge = False
+    if red is not None and green is not None and (red + green) > 0:
+        red_ratio = red / (red + green)
+        diverge = zt >= 40 and red_ratio < 0.45
+    # 一字占比过高（zt_real 缺失时不判）
+    yizi_heavy = False
+    if zt_real is not None and zt > 0:
+        yizi_heavy = (zt - zt_real) / zt > 0.3  # 一字占比 >30%
+    # 梯队塌方：高板(lb3p)少而首板多、或 lb3p 骤减
+    tier_break = False
+    prev_3p = (prev or {}).get("lb3p", 0)
+    if lb_total > 0:
+        tier_break = lb3p == 0 and lb_total >= 3  # 没有3板+但一堆2板 = 高度压制
+    if prev and prev_3p > 0 and lb3p < prev_3p / 2:
+        tier_break = True  # 高板梯队减半 = 退潮
 
     if zt <= 25 and recede_days >= 2:
-        state = "冰点"
-        tone = "ice"
+        state = "冰点"; tone = "ice"
         label = "冰点期（连续%d天·涨停仅%d家）" % (recede_days + 1, zt)
         advice = "冰点易产龙：竞价第一若低位启动可重点关注，情绪反转点临近"
-    elif zt >= 55 and mt >= 4 and zt >= prev_zt:
-        state = "上升"
-        tone = "pos"
-        label = "上升期（涨停%d家·最高%d板·情绪升温）" % (zt, mt)
-        advice = "适合竞价：竞价第一晋级概率大，可积极关注"
+    elif diverge or tier_break:
+        state = "退潮"; tone = "neg"
+        why = []
+        if diverge: why.append("红绿背离(涨停%d但红盘占比低)" % zt)
+        if tier_break: why.append("高位梯队塌方(3板+仅%d家)" % lb3p)
+        label = "退潮期（涨停%d家·%s）" % (zt, "·".join(why))
+        advice = "谨慎：涨停是抱团虚涨或高度压制，竞价第一晋级概率小，轻仓或观望"
     elif recede_days >= 1 and (zt_drop >= 15 or zb >= 20 or zt <= 40):
-        state = "退潮"
-        tone = "neg"
+        state = "退潮"; tone = "neg"
         label = "退潮期（涨停%d家↓%d%%·炸板%d家）" % (zt, round(zt_drop), zb)
         advice = "谨慎：竞价第一晋级概率小，高位追高易大面，建议轻仓或观望"
+    elif zt >= 55 and mt >= 4 and zt >= prev_zt and lb3p >= 1:
+        state = "上升"; tone = "pos"
+        label = "上升期（涨停%d家·最高%d板·梯队健康）" % (zt, mt)
+        advice = "适合竞价：情绪升温且高度递进，竞价第一晋级概率大，可积极关注"
+    elif yizi_heavy:
+        state = "分歧"; tone = "warn"
+        label = "分歧期（涨停%d家·一字占%d%%·缩量难追）" % (zt, round((zt - zt_real) / zt * 100))
+        advice = "一字过多难上车，竞价第一若非换手板谨慎追，等分歧再看"
     else:
-        state = "分歧"
-        tone = "warn"
+        state = "分歧"; tone = "warn"
         label = "分歧期（涨停%d家·炸板%d家）" % (zt, zb)
         advice = "中性：竞价第一看题材持续性，关注板块共振而非孤军"
 
+    # 统一附加量能与强势板块到标签
+    if amount_txt:
+        label += "·" + amount_txt
+    sector_names = [s.get("name") for s in top_sectors[:3] if s.get("name")]
+    if sector_names:
+        label += "·领涨:%s" % "/".join(sector_names)
+
+    recent = []
+    for h in hist[-5:]:
+        item = {"date": h["date"][5:], "zt": h.get("zt", 0), "maxTier": h.get("maxTier", 0)}
+        if h.get("red") is not None:
+            item["red"] = h["red"]
+        if h.get("marketAmountYi") is not None:
+            item["amountYi"] = h["marketAmountYi"]
+        recent.append(item)
     return {"state": state, "label": label, "tone": tone, "advice": advice,
-            "recent": [{"date": h["date"][5:], "zt": h["zt"], "maxTier": h["maxTier"]} for h in hist[-5:]]}
+            "recent": recent, "sectors": top_sectors}
 
 
 
