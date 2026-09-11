@@ -26,6 +26,11 @@ try:
 except ImportError:  # tests 从项目根导入 backend.server 时兼容
     from backend import db
 
+try:
+    import env_engine
+except ImportError:  # tests 从项目根导入 backend.server 时兼容
+    from backend import env_engine
+
 
 
 try:
@@ -42,6 +47,10 @@ HISTORY_DIR = os.path.join(DATA_DIR, "history")
 PLAN_DIR = os.path.join(DATA_DIR, "plan")
 ZTPOOL_DIR = os.path.join(DATA_DIR, "ztpool")  # 每日涨停池连板明细（次日给竞价股标"昨N连板"）
 SENTIMENT_DIR = os.path.join(DATA_DIR, "sentiment")  # 每日情绪摘要（判断情绪周期/环境）
+MARKET_DAILY_DIR = os.path.join(DATA_DIR, "market_daily")  # 每日收盘市场画像（赚钱环境用）
+MARKET_INDICES_FILE = os.path.join(DATA_DIR, "market_indices.json")  # 指数收盘序列累积（供 MA）
+ENV_DIR = os.path.join(DATA_DIR, "env")  # 赚钱环境画像（env 页读）
+ENV_RULES_FILE = os.path.join(DATA_DIR, "env_rules.json")  # 环境判定阈值（用户可改）
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -1654,6 +1663,8 @@ def _run_close_review():
         build_review(date, refresh=True)
         save_ztpool_json(date)  # 涨停池落盘本地 JSON，次日竞价标注"昨N连板"（不依赖 MySQL）
         save_sentiment_json(date)  # 情绪摘要落盘，供环境周期判定（不依赖 MySQL）
+        write_market_daily(date)  # 市场画像（成交集中度/中位数/指数序列），赚钱环境用
+        save_env_json(date)  # 赚钱环境画像（四类打分）
         _run_preselect_node(date)  # 节点预选票：冰点/退潮日筛候选，并入 sentiment JSON
         print("[close] 当日复盘已自动生成并入库: %s" % date, flush=True)
     except Exception as exc:
@@ -2468,8 +2479,14 @@ def parse_lianban(zt_rows, strong_rows):
     return {"tier": tier, "maxTier": max_tier}
 
 
-def fetch_spot_breadth(date_str):
-    """腾讯全市场快照计算红/绿/平盘家数（沪深，排除北交所）。"""
+_spot_profile_cache = {"date": "", "df": None}  # 当日腾讯全市场快照缓存（多个函数复用一次拉取）
+
+
+def _get_spot_df(date_str):
+    """当日腾讯全市场快照（沪深，排除北交所）。当日缓存，供 breadth/market_profile 复用。"""
+    global _spot_profile_cache
+    if _spot_profile_cache["date"] == date_str and _spot_profile_cache["df"] is not None:
+        return _spot_profile_cache["df"]
     if ak is None:
         raise RuntimeError("akshare 未安装")
     import io
@@ -2479,8 +2496,373 @@ def fetch_spot_breadth(date_str):
     if df is None or df.empty:
         raise RuntimeError("腾讯无数据")
     df = df[~df["code"].astype(str).str.startswith("bj")]
+    _spot_profile_cache = {"date": date_str, "df": df}
+    return df
+
+
+def fetch_spot_breadth(date_str):
+    """腾讯全市场快照计算红/绿/平盘家数（沪深，排除北交所）。当日缓存复用。"""
+    df = _get_spot_df(date_str)
     zdf = df["zdf"].astype(float)
     return {"up": int((zdf > 0).sum()), "down": int((zdf < 0).sum()), "flat": int((zdf == 0).sum())}
+
+
+def fetch_market_profile(date_str):
+    """当日全市场画像：红绿/涨跌中位/成交总额/Top成交占比（腾讯快照一次拉取）。
+
+    返回 {up,down,flat,redRatio,medChangePct,amountTotalYi,top10Share,top20Share}。
+    amountTotalYi 单位亿元；share 为百分比。
+    """
+    df = _get_spot_df(date_str)
+    zdf = df["zdf"].astype(float)
+    up = int((zdf > 0).sum())
+    down = int((zdf < 0).sum())
+    flat = int(len(df) - up - down)
+    total = len(df)
+    red_ratio = round(up / total * 100, 1) if total else None
+    med_change = float(zdf.median()) if len(zdf) else None
+    # 成交额：腾讯快照 turnover 列单位万元 → 转元
+    amount_col = "turnover"
+    if amount_col in df.columns:
+        amt = df[amount_col].astype(float) * 1e4
+        amt_total = float(amt.sum())
+        sorted_amt = amt.sort_values(ascending=False)
+        top10 = float(sorted_amt.head(10).sum())
+        top20 = float(sorted_amt.head(20).sum())
+        top10_share = round(top10 / amt_total * 100, 1) if amt_total else None
+        top20_share = round(top20 / amt_total * 100, 1) if amt_total else None
+        amount_total_yi = round(amt_total / 1e8, 1) if amt_total else None
+    else:
+        top10_share = top20_share = amount_total_yi = None
+    return {
+        "up": up, "down": down, "flat": flat,
+        "redRatio": red_ratio, "medChangePct": round(med_change, 2) if med_change is not None else None,
+        "amountTotalYi": amount_total_yi, "top10Share": top10_share, "top20Share": top20_share,
+    }
+
+
+def write_market_daily(date_str):
+    """收盘落盘当日市场画像到 data/market_daily/<日期>.json，并追加指数序列到 market_indices.json。"""
+    try:
+        profile = fetch_market_profile(date_str)
+    except Exception as exc:
+        print("[env] %s 市场画像抓取失败: %r" % (date_str, exc), flush=True)
+        return False
+    indices = []
+    try:
+        indices = fetch_indices_kline(date_str)
+    except Exception as exc:
+        print("[env] %s 指数日K失败: %r" % (date_str, exc), flush=True)
+    day = {
+        "date": date_str,
+        "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        **profile,
+        "indices": indices,
+    }
+    try:
+        os.makedirs(MARKET_DAILY_DIR, exist_ok=True)
+        with open(os.path.join(MARKET_DAILY_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
+            json.dump(day, f, ensure_ascii=False)
+    except Exception as exc:
+        print("[env] %s market_daily 落盘失败: %r" % (date_str, exc), flush=True)
+        return False
+    _append_market_indices(date_str, indices)
+    return True
+
+
+def _append_market_indices(date_str, indices):
+    """把当日 4 指数收盘追加到累积文件（供 MA20/MA60）。原子写。"""
+    seq = {}
+    if os.path.isfile(MARKET_INDICES_FILE):
+        try:
+            with open(MARKET_INDICES_FILE, encoding="utf-8") as f:
+                seq = json.load(f)
+        except Exception:
+            seq = {}
+    for i in indices:
+        sym = _index_symbol_of(i.get("name"))
+        if not sym:
+            continue
+        entry = seq.setdefault(sym, {"dates": [], "closes": []})
+        close = i.get("close")
+        if close is None:
+            continue
+        if entry["dates"] and entry["dates"][-1] == date_str:
+            entry["closes"][-1] = close
+        else:
+            entry["dates"].append(date_str)
+            entry["closes"].append(close)
+    try:
+        tmp = MARKET_INDICES_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(seq, f, ensure_ascii=False)
+        os.replace(tmp, MARKET_INDICES_FILE)
+    except Exception as exc:
+        print("[env] market_indices 写盘失败: %r" % exc, flush=True)
+
+
+def _index_symbol_of(name):
+    return {"上证指数": "sh000001", "深证成指": "sz399001", "创业板指": "sz399006", "科创50": "sh000688"}.get(name)
+
+
+# ---------- 赚钱环境：信号计算 ----------
+
+def _prev_data_date(dirpath, date_str):
+    """目录下严格早于 date_str 的最大日期文件名（不含扩展名）。无则 None。"""
+    if not os.path.isdir(dirpath):
+        return None
+    try:
+        names = [n[:-5] for n in os.listdir(dirpath)
+                 if n.endswith(".json") and n[:-5] < date_str]
+    except OSError:
+        return None
+    return max(names) if names else None
+
+
+def _load_market_daily(date_str):
+    path = os.path.join(MARKET_DAILY_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _load_market_indices():
+    if not os.path.isfile(MARKET_INDICES_FILE):
+        return {}
+    try:
+        with open(MARKET_INDICES_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _jaccard(a, b):
+    sa, sb = set(x for x in a if x), set(x for x in b if x)
+    if not sa and not sb:
+        return None
+    return round(len(sa & sb) / len(sa | sb), 3)
+
+
+def _compute_day_signals(date_str):
+    """拼六组信号（全部当日收盘可得）。返回 signals dict。缺数据的组用 None 兜底。"""
+    sent_today = _load_day_sentiment(date_str)
+    prev_date = _prev_data_date(SENTIMENT_DIR, date_str)
+    sent_prev = _load_day_sentiment(prev_date) if prev_date else None
+    rows_today = _ztpool_rows(date_str)
+    prev_zt_date = _prev_data_date(ZTPOOL_DIR, date_str)
+    rows_prev = _ztpool_rows(prev_zt_date) if prev_zt_date else []
+    mkt = _load_market_daily(date_str)
+    mkt_prev = _load_market_daily(prev_date) if prev_date else None
+
+    # --- S1 涨停结构 ---
+    def _i(d, k):
+        try:
+            return int((d or {}).get(k) or 0)
+        except (TypeError, ValueError):
+            return 0
+    zt, zb = _i(sent_today, "zt"), _i(sent_today, "zb")
+    s1 = {
+        "zt": zt, "ztReal": _i(sent_today, "zt_real"), "dt": _i(sent_today, "dt"), "zb": zb,
+        "zbRate": round(zb / (zt + zb) * 100, 1) if (zt + zb) else None,
+        "lbTotal": _i(sent_today, "lb_total"), "lb2": _i(sent_today, "lb2"),
+        "lb3": _i(sent_today, "lb3"), "lb3p": _i(sent_today, "lb3p"),
+        "maxTier": _i(sent_today, "maxTier"),
+        "ztChangePct": round((zt - _i(sent_prev, "zt")) / _i(sent_prev, "zt") * 100, 1) if _i(sent_prev, "zt") else None,
+    }
+
+    # --- S2 红绿量能 ---
+    def _num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    red = _num((mkt or {}).get("up")) if mkt else _num((sent_today or {}).get("red"))
+    green = _num((mkt or {}).get("down")) if mkt else _num((sent_today or {}).get("green"))
+    amount = _num((mkt or {}).get("amountTotalYi")) if mkt else _num((sent_today or {}).get("marketAmountYi"))
+    amount_prev = _num((mkt_prev or {}).get("amountTotalYi")) if mkt_prev else _num((sent_prev or {}).get("marketAmountYi"))
+    s2 = {
+        "red": int(red) if red is not None else None,
+        "green": int(green) if green is not None else None,
+        "redRatio": round(red / (red + green), 3) if (red is not None and green is not None and (red + green) > 0) else None,
+        "amountYi": amount, "amountPrevYi": amount_prev,
+        "amountChgPct": round((amount - amount_prev) / amount_prev * 100, 1) if (amount and amount_prev) else None,
+    }
+
+    # --- S3 晋级/溢价（隔日）---
+    prev_codes = [r.get("code") for r in rows_prev if r.get("code")]
+    today_codes = {r.get("code") for r in rows_today if r.get("code")}
+    prev_1 = [r.get("code") for r in rows_prev if (r.get("lb") or 0) == 1]
+    prev_2p = [r.get("code") for r in rows_prev if (r.get("lb") or 0) >= 2]
+    promote_n = len([c for c in prev_codes if c in today_codes])
+    premium_map = {}
+    try:
+        if prev_codes:
+            premium_map = fetch_realtime_pct(prev_codes)
+    except Exception as exc:
+        print("[env] %s 昨池实时涨幅拉取失败: %r" % (date_str, exc), flush=True)
+    prem_vals = [premium_map.get(c) for c in prev_codes if premium_map.get(c) is not None]
+    prem_lb = [premium_map.get(c) for c in prev_2p if premium_map.get(c) is not None]
+    s3 = {
+        "prevN": len(prev_codes),
+        "promoteN": promote_n,
+        "promoteRate": round(promote_n / len(prev_codes), 3) if prev_codes else None,
+        "first2Rate": round(len([c for c in prev_1 if c in today_codes]) / len(prev_1), 3) if prev_1 else None,
+        "lbPromoteRate": round(len([c for c in prev_2p if c in today_codes]) / len(prev_2p), 3) if prev_2p else None,
+        "avgPremium": round(sum(prem_vals) / len(prem_vals), 2) if prem_vals else None,
+        "lbAvgPremium": round(sum(prem_lb) / len(prem_lb), 2) if prem_lb else None,
+        "noQuote": not bool(premium_map),
+    }
+
+    # --- S4 板块持续性 ---
+    top_today = [s.get("name") for s in (sent_today or {}).get("topSectors") or []]
+    top_yest = [s.get("name") for s in (sent_prev or {}).get("topSectors") or []]
+    sector_zt_today = {}
+    for r in rows_today:
+        ind = str(r.get("industry") or "").strip()
+        if ind:
+            sector_zt_today[ind] = sector_zt_today.get(ind, 0) + 1
+    prev_leader = top_yest[0] if top_yest else None
+    sectors_ge3 = sum(1 for c in sector_zt_today.values() if c >= 3)
+    sectors_ge4 = sum(1 for c in sector_zt_today.values() if c >= 4)
+    top1_zt = (sent_today or {}).get("topSectors") or []
+    top1_share = round((top1_zt[0].get("zt") or 0) / zt, 3) if (top1_zt and zt) else None
+    s4 = {
+        "topToday": top_today, "topYesterday": top_yest,
+        "jaccard": _jaccard(top_today, top_yest),
+        "prevLeaderTodayZt": sector_zt_today.get(prev_leader) if prev_leader else None,
+        "sectorCount": len(sector_zt_today), "sectorsGe3": sectors_ge3, "sectorsGe4": sectors_ge4,
+        "top1ZtShare": top1_share,
+    }
+
+    # --- S5 成交集中/中位数 ---
+    s5 = {
+        "amountTotalYi": (mkt or {}).get("amountTotalYi"),
+        "top10Share": (mkt or {}).get("top10Share"),
+        "top20Share": (mkt or {}).get("top20Share"),
+        "medChangePct": (mkt or {}).get("medChangePct"),
+    }
+
+    # --- S6 趋势/主线 ---
+    seq = _load_market_indices()
+    idx_above20 = idx_above60 = 0
+    ma20_up = False
+    checked = 0
+    for sym in ("sh000001", "sz399006"):
+        closes = (seq.get(sym) or {}).get("closes") or []
+        if len(closes) < 2:
+            continue
+        checked += 1
+        latest = closes[-1]
+        ma20 = _ma(closes, 20)
+        ma60 = _ma(closes, 60)
+        if ma20 is not None and latest > ma20:
+            idx_above20 += 1
+        if ma60 is not None and latest > ma60:
+            idx_above60 += 1
+    sh_closes = (seq.get("sh000001") or {}).get("closes") or []
+    if len(sh_closes) >= 25:
+        ma20_now = _ma(sh_closes, 20)
+        ma20_prev = _ma(sh_closes[:-5], 20)
+        ma20_up = (ma20_now is not None and ma20_prev is not None and ma20_now > ma20_prev)
+    head_n = 0
+    try:
+        head, _dark = classify_horses(load_sector_indices())
+        head_n = len(head)
+    except Exception:
+        pass
+    s6 = {
+        "idxChecked": checked, "idxAbove20": idx_above20, "idxAbove60": idx_above60,
+        "ma20Up": ma20_up, "headN": head_n,
+    }
+    return {"S1": s1, "S2": s2, "S3": s3, "S4": s4, "S5": s5, "S6": s6,
+            "dates": {"today": date_str, "sentPrev": prev_date, "ztPrev": prev_zt_date}}
+
+
+def save_env_json(date_str):
+    """计算当日赚钱环境画像并落盘 data/env/<日期>.json。保留已有 manual。失败不抛。"""
+    if not _load_day_sentiment(date_str):
+        print("[env] %s 无情绪摘要，跳过环境计算" % date_str, flush=True)
+        return False
+    try:
+        signals = _compute_day_signals(date_str)
+        rules = env_engine.load_rules(ENV_RULES_FILE)
+        result = env_engine.compute(signals, rules)
+    except Exception as exc:
+        print("[env] %s 环境计算失败: %r" % (date_str, exc), flush=True)
+        return False
+    # 保留已有 manual
+    manual = None
+    path = os.path.join(ENV_DIR, date_str + ".json")
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                manual = (json.load(f) or {}).get("manual")
+        except Exception:
+            manual = None
+    day = {
+        "date": date_str,
+        "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "rulesVersion": rules.get("version"),
+        "signals": signals,
+        "scores": result["scores"],
+        "conclusion": result["conclusion"],
+        "manual": manual,
+    }
+    try:
+        os.makedirs(ENV_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(day, f, ensure_ascii=False)
+        print("[env] 赚钱环境已落盘: %s %s (分 %s)" % (
+            date_str, result["conclusion"]["label"], result["scores"]), flush=True)
+        return True
+    except Exception as exc:
+        print("[env] %s 落盘失败: %r" % (date_str, exc), flush=True)
+        return False
+
+
+def load_env(date_str):
+    """读某日环境画像。无则 None。"""
+    path = os.path.join(ENV_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def list_env_dates():
+    if not os.path.isdir(ENV_DIR):
+        return []
+    try:
+        return sorted(n[:-5] for n in os.listdir(ENV_DIR) if n.endswith(".json"))[::-1]
+    except OSError:
+        return []
+
+
+def env_history(days=12):
+    """近 N 日环境序列（倒序→升序），供历史曲线。"""
+    dates = list_env_dates()[:days]
+    rows = []
+    for d in sorted(dates):
+        e = load_env(d)
+        if not e:
+            continue
+        rows.append({
+            "date": d, "scores": e.get("scores") or {},
+            "state": (e.get("conclusion") or {}).get("state"),
+            "manual": e.get("manual"),
+            "zt": ((e.get("signals") or {}).get("S1") or {}).get("zt"),
+            "promoteRate": ((e.get("signals") or {}).get("S3") or {}).get("promoteRate"),
+            "jaccard": ((e.get("signals") or {}).get("S4") or {}).get("jaccard"),
+            "top10Share": ((e.get("signals") or {}).get("S5") or {}).get("top10Share"),
+        })
+    return rows
 
 
 def compute_prev_premium(prev_rows):
@@ -2840,6 +3222,34 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 self.send_json({"ok": True, "date": date, **preselect})
             return
+        if parsed.path == "/api/env/dates":
+            self.send_json({"ok": True, "dates": list_env_dates()})
+            return
+        if parsed.path == "/api/env/history":
+            try:
+                days = int((parse_qs(parsed.query).get("days") or ["12"])[0])
+            except (TypeError, ValueError):
+                days = 12
+            self.send_json({"ok": True, "rows": env_history(max(1, min(days, 60)))})
+            return
+        if parsed.path == "/api/env":
+            qs = parse_qs(parsed.query)
+            date = (qs.get("date") or [""])[0]
+            refresh = (qs.get("refresh") or [""])[0] == "1"
+            if not date:
+                dates = list_env_dates()
+                date = dates[0] if dates else ""
+            if not date:
+                self.send_json({"ok": False, "error": "暂无环境数据"}, status=404)
+                return
+            if refresh:
+                save_env_json(date)
+            env = load_env(date)
+            if not env:
+                self.send_json({"ok": False, "error": "未找到该日环境: %s" % date}, status=404)
+                return
+            self.send_json({"ok": True, **env})
+            return
         if parsed.path == "/api/history/stock":
             code = (parse_qs(parsed.query).get("code") or [""])[0]
             try:
@@ -2926,6 +3336,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/env":
+            self._post_env()
+            return
         if parsed.path != "/api/review":
             self.send_json({"ok": False, "error": "未知接口"}, status=404)
             return
@@ -2954,6 +3367,36 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True})
         else:
             self.send_json({"ok": False, "error": "保存失败: %s" % db.last_error()}, status=502)
+
+    def _post_env(self):
+        """人工覆盖某日赚钱环境结论。body {date, manual:{state,label,tone,advice,note}}"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            payload = json.loads(body) if body else {}
+        except Exception as exc:
+            self.send_json({"ok": False, "error": "请求体解析失败: %s" % exc}, status=400)
+            return
+        date = str(payload.get("date") or "").strip()
+        manual = payload.get("manual")
+        if not date:
+            self.send_json({"ok": False, "error": "缺少 date"}, status=400)
+            return
+        # manual 允许为 null 表示清除覆盖
+        if manual is not None and not isinstance(manual, dict):
+            self.send_json({"ok": False, "error": "manual 须为对象或 null"}, status=400)
+            return
+        env = load_env(date)
+        if not env:
+            self.send_json({"ok": False, "error": "未找到该日环境: %s" % date}, status=404)
+            return
+        env["manual"] = manual
+        try:
+            with open(os.path.join(ENV_DIR, date + ".json"), "w", encoding="utf-8") as f:
+                json.dump(env, f, ensure_ascii=False)
+            self.send_json({"ok": True})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": "保存失败: %s" % exc}, status=502)
 
     def log_message(self, fmt, *args):
         sys.stdout.write("[http] " + fmt % args + "\n")

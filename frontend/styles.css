@@ -998,9 +998,20 @@ input[type="search"] {
 
   .col-market,
   .col-amount,
-  .col-realtime {
+  .col-realtime,
+  .col-reason {
     display: none;
   }
+}
+
+/* 选股原因列：muted 小字，避免太长挤压其它列 */
+.col-reason {
+  font-size: 12px;
+  color: var(--accent-strong);
+  white-space: nowrap;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 @media (max-width: 620px) {
@@ -1834,3 +1845,88 @@ input[type="search"] {
 .env-ice  { background: var(--accent-bg); color: var(--accent-strong); }
 .env-ice  .env-dot { background: var(--accent); }
 
+
+/* ---------- 赚钱环境页 ---------- */
+.env-main {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 16px;
+  gap: 14px;
+}
+
+.env-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.env-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.env-card-top {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.env-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.env-card-name { font-size: 13px; font-weight: 600; }
+.env-card-head strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.env-card-bar {
+  height: 6px;
+  margin: 8px 0 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.env-card-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+.env-card-desc { font-size: 12px; color: var(--text-3); }
+
+.env-panel { margin-top: 14px; }
+.env-kv {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px 16px;
+  padding: 12px 14px;
+}
+.env-kv-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  border-bottom: 1px dashed var(--border);
+  padding-bottom: 4px;
+}
+.env-kv-label { color: var(--text-2); }
+.env-kv-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.env-history { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.env-hrow { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.env-hdate { width: 46px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.env-hbars { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.env-hbar { height: 5px; background: var(--surface-3); border-radius: 999px; overflow: hidden; }
+.env-hbar span { display: block; height: 100%; border-radius: 999px; }
+.env-hbar-trend span { background: var(--up); }
+.env-hbar-short span { background: var(--warn); }
+.env-hbar-group span { background: var(--accent); }
+.env-hbar-chaos span { background: var(--down); }
+.env-hlabel { width: 90px; color: var(--text-2); text-align: right; }
+.env-empty { padding: 20px; text-align: center; color: var(--text-3); font-size: 13px; }
+
+.env-manual { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.env-radio { display: flex; flex-wrap: wrap; gap: 14px; }
+.env-radio-item { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+.env-manual-actions { display: flex; gap: 8px; }
