@@ -1930,3 +1930,18 @@ input[type="search"] {
 .env-radio { display: flex; flex-wrap: wrap; gap: 14px; }
 .env-radio-item { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
 .env-manual-actions { display: flex; gap: 8px; }
+
+/* 战法跟踪池 */
+.track-seq { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.track-arrow { color: var(--text-3); font-size: 11px; }
+
+/* 战法：命中维度换行显示，避免挤压评分列 */
+.hits-cell {
+  white-space: normal !important;
+  min-width: 200px;
+  max-width: 320px;
+  line-height: 1.9;
+}
+.hits-cell .tag { display: inline-block; margin: 1px 2px; }
+.stock-link { color: var(--accent-strong); text-decoration: none; font-weight: 600; }
+.stock-link:hover { text-decoration: underline; }

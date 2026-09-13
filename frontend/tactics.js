@@ -19,6 +19,15 @@
     if (n >= 1e4) return Math.round(n / 1e4) + '万';
     return Math.round(n) + '';
   }
+  // 东方财富个股K线页（外部链接）
+  function emUrl(code) {
+    const c = String(code || '').padStart(6, '0');
+    const pre = c.startsWith('6') ? 'sh' : (c.startsWith('4') || c.startsWith('8') ? 'bj' : 'sz');
+    return 'https://quote.eastmoney.com/' + pre + c + '.html';
+  }
+  function codeLink(code, name) {
+    return `<a class="stock-link" href="${emUrl(code)}" target="_blank" rel="noopener">${esc(name || code)}</a>`;
+  }
 
   let toastTimer = null;
   function toast(msg) {
@@ -40,6 +49,9 @@
     tacticsMeta: $('#tacticsMeta'),
     tacticsBody: $('#tacticsBody'),
     tacticsEmpty: $('#tacticsEmpty'),
+    trackMeta: $('#trackMeta'),
+    trackBody: $('#trackBody'),
+    trackEmpty: $('#trackEmpty'),
     btnPrevDay: $('#btnPrevDay'),
     btnNextDay: $('#btnNextDay'),
     toast: $('#toast')
@@ -105,8 +117,8 @@
       return `
         <tr>
           <td class="num">${i + 1}</td>
-          <td class="stock-code">${esc(c.code)}</td>
-          <td><span class="stock-name">${esc(c.name)}</span> <span class="stock-sector">${esc(c.industry)}</span></td>
+          <td class="stock-code"><a class="stock-link" href="${emUrl(c.code)}" target="_blank" rel="noopener">${esc(c.code)}</a></td>
+          <td>${codeLink(c.code, c.name)} <span class="stock-sector">${esc(c.industry)}</span></td>
           <td class="num">${c.lb || 0}板</td>
           <td class="num">${c.sectorZt || 0}只</td>
           <td class="num">${c.latestTurnover != null ? fmtNum(c.latestTurnover, 1) + '%' : '—'}</td>
@@ -114,11 +126,38 @@
           <td class="num">${c.prevVolRatio != null ? fmtNum(c.prevVolRatio, 1) + 'x' : '—'}</td>
           <td class="num">${c.floatCapYi != null ? fmtNum(c.floatCapYi, 0) + '亿' : '—'}</td>
           <td class="num">${c.upside != null ? fmtNum(c.upside * 100, 1) + '%' : '—'}</td>
-          <td>${hits}${warns}</td>
+          <td class="hits-cell">${hits}${warns}</td>
           <td class="num"><strong>${c.score || 0}</strong></td>
         </tr>`;
     }).join('');
+    renderTracking(d.tracking || []);
     refreshIcons();
+  }
+
+  const TRACK_STAGE_CLS = {
+    '首板健康': 'tag-up', '抬升': 'tag-warn', '缩量加速': 'tag-accent', '放量兑现': 'tag-down'
+  };
+  const TRACK_STATUS_CLS = { '蓄势': 'tag', '启动': 'tag-up', '兑现': 'tag-down', '转弱': 'tag-down' };
+
+  function renderTracking(list) {
+    els.trackMeta.textContent = list.length + ' 只在跟踪';
+    els.trackEmpty.hidden = list.length > 0;
+    els.trackBody.innerHTML = list.map(e => {
+      const days = e.days || [];
+      const last = days[days.length - 1] || {};
+      const seq = days.map(d => `<span class="tag ${TRACK_STAGE_CLS[d.stage] || 'tag'}">${esc(d.stage || '—')}</span>`).join('<span class="track-arrow">→</span>');
+      const stCls = TRACK_STATUS_CLS[e.status] || 'tag';
+      return `
+        <tr>
+          <td class="stock-code"><a class="stock-link" href="${emUrl(e.code)}" target="_blank" rel="noopener">${esc(e.code)}</a></td>
+          <td>${codeLink(e.code, e.name)} <span class="stock-sector">${esc(e.industry || '')}</span></td>
+          <td class="num">${esc(e.entryDate || '')}</td>
+          <td class="num">${days.length} 天</td>
+          <td><span class="tag ${stCls}">${esc(e.status || '')}</span></td>
+          <td class="track-seq">${seq || '—'}</td>
+          <td class="num">${last.turnover != null ? fmtNum(last.turnover, 1) + '%' : '—'}</td>
+        </tr>`;
+    }).join('');
   }
 
   function bindEvents() {

@@ -256,3 +256,19 @@ MySQL 不可用时，历史页自动降级读取 `data/history/*.json` 归档，
 - 落盘 `data/tactics/<日期>.json`
 - `GET /api/tactics?date=`、`GET /api/tactics/dates`
 - 收盘 15:05 自动扫（`_run_close_review` 末步 `scan_tactics`）
+
+### 跨日跟踪池
+
+符合的标的常震荡几天才启动，故对入选股做**跨日跟踪**（最长 7 个交易日）：
+
+- 入池：被扫描选中且得分 ≥80 → 入池
+- 每日重算：换手率阶段 + 状态流转
+- 状态：`蓄势`（横盘/缩量）→ `启动`（放量突破/换手抬升）/ `兑现`（放量兑现=跑路）/ `转弱`（跌破MA20）
+- 出池：兑现/转弱立即出池，或满 7 个交易日到期
+- 落盘 `data/tactics/track.json`，`GET /api/tactics` 返回 `tracking` 字段
+- 战法页"跟踪中"区块显示：入池日 / 已跟踪天数 / 状态 / 阶段变化序列
+
+### 页面交互
+
+- 命中维度自动换行（避免挤压评分列）
+- 代码/名称可点击跳转**东方财富个股 K 线页**（`quote.eastmoney.com/{sh|sz}{code}.html`，新标签打开）

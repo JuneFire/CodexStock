@@ -119,8 +119,9 @@ def analyze_kline(rows, rules):
     seq_len = rules["turnoverSeqLen"]
     turnover_seq = turns[-seq_len:]
     latest_turnover = turns[-1] if turns else None
+    day_chg = round((closes[-1] / closes[-2] - 1) * 100, 2) if (len(closes) >= 2 and closes[-2]) else None
     return {
-        "close": close, "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60,
+        "close": close, "dayChg": day_chg, "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60,
         "aboveMa60": above60, "bullishAlign": bullish, "breakMa60": break60,
         "maConverge": round(ma_converge, 4) if ma_converge is not None else None,
         "boxWidth": round(box_width, 4) if box_width is not None else None,

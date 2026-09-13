@@ -58,6 +58,9 @@ ENV_DIR = os.path.join(DATA_DIR, "env")  # 赚钱环境画像（env 页读）
 ENV_RULES_FILE = os.path.join(DATA_DIR, "env_rules.json")  # 环境判定阈值（用户可改）
 TACTICS_DIR = os.path.join(DATA_DIR, "tactics")  # 二板战法扫描结果
 TACTICS_RULES_FILE = os.path.join(DATA_DIR, "tactics_rules.json")  # 战法阈值（用户可改）
+TRACK_FILE = os.path.join(DATA_DIR, "tactics", "track.json")  # 二板战法跨日跟踪池
+TRACK_DAYS = 7  # 跟踪保留交易日数
+TRACK_MIN_SCORE = 80  # 入池最低分
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -1674,6 +1677,7 @@ def _run_close_review():
         save_env_json(date)  # 赚钱环境画像（四类打分）
         _run_preselect_node(date)  # 节点预选票：冰点/退潮日筛候选，并入 sentiment JSON
         scan_tactics(date)  # 二板战法扫描：涨停首板/2板的技术面+换手率阶段
+        update_tracking(date)  # 二板战法跨日跟踪池（保留7个交易日）
         print("[close] 当日复盘已自动生成并入库: %s" % date, flush=True)
     except Exception as exc:
         print("[close] 自动生成复盘失败: %r" % exc, flush=True)
@@ -2992,9 +2996,117 @@ def list_tactics_dates():
     if not os.path.isdir(TACTICS_DIR):
         return []
     try:
-        return sorted(n[:-5] for n in os.listdir(TACTICS_DIR) if n.endswith(".json"))[::-1]
+        return sorted(n[:-5] for n in os.listdir(TACTICS_DIR)
+                      if n.endswith(".json") and n[:-5] != "track")[::-1]
     except OSError:
         return []
+
+
+# ---------- 二板战法跨日跟踪池 ----------
+
+def load_tracking():
+    """跟踪池：{entries:[...]}。无则空。"""
+    if not os.path.isfile(TRACK_FILE):
+        return {"entries": []}
+    try:
+        with open(TRACK_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and isinstance(d.get("entries"), list):
+            return d
+    except Exception:
+        pass
+    return {"entries": []}
+
+
+def _save_tracking(data):
+    try:
+        os.makedirs(TACTICS_DIR, exist_ok=True)
+        tmp = TRACK_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, TRACK_FILE)
+        return True
+    except Exception as exc:
+        print("[track] 落盘失败: %r" % exc, flush=True)
+        return False
+
+
+def _track_status(feats, stage):
+    """跟踪状态：兑现/转弱(出池) 或 启动/蓄势(在池)。"""
+    if stage == "放量兑现":
+        return "兑现"
+    if feats.get("ma20") is not None and feats.get("close") is not None and feats["close"] < feats["ma20"]:
+        return "转弱"
+    day_chg = feats.get("dayChg")
+    if (day_chg is not None and day_chg >= 5) or (feats.get("breakMa60") and (feats.get("volRatio") or 0) >= 1.5):
+        return "启动"
+    return "蓄势"
+
+
+def update_tracking(date_str):
+    """更新跨日跟踪池：重算在池标的 + 加入今日入选。保留 TRACK_DAYS 个交易日。"""
+    rules = tactics_engine.load_rules(TACTICS_RULES_FILE)
+    track = load_tracking()
+    entries = track["entries"]
+    by_code = {e.get("code"): e for e in entries}
+    start = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
+
+    # 1. 重算在池未出池的标的
+    for e in entries:
+        if e.get("closed"):
+            continue
+        if e.get("days") and e["days"][-1].get("date") == date_str:
+            continue  # 今日已算
+        code = e.get("code")
+        if not code:
+            continue
+        feats = tactics_engine.analyze_kline(_fetch_kline_full(code, start), rules)
+        if not feats:
+            continue
+        stage, _ = tactics_engine.judge_turnover_stage(feats.get("turnoverSeq") or [], rules)
+        status = _track_status(feats, stage)
+        e["days"].append({
+            "date": date_str, "stage": stage, "status": status,
+            "turnover": feats.get("latestTurnover"), "dayChg": feats.get("dayChg"),
+            "close": feats.get("close"), "prevVolRatio": feats.get("prevVolRatio"),
+        })
+        e["status"] = status
+        e["lastDate"] = date_str
+        # 有效交易日计数（days 条数即跟踪交易日数）
+        if status in ("兑现", "转弱") or len(e["days"]) >= TRACK_DAYS:
+            e["closed"] = True
+            e["exitDate"] = date_str
+            e["exitReason"] = status if status in ("兑现", "转弱") else "到期"
+
+    # 2. 加入今日入选（未在池、未出池过）
+    today = load_tactics(date_str)
+    if today:
+        for c in today.get("candidates") or []:
+            code = c.get("code")
+            if not code or code in by_code:
+                continue
+            if (c.get("score") or 0) < TRACK_MIN_SCORE:
+                continue
+            entries.append({
+                "code": code, "name": c.get("name"), "industry": c.get("industry"),
+                "entryDate": date_str, "entryLb": c.get("lb"), "entryScore": c.get("score"),
+                "entryStage": c.get("stage"), "status": "蓄势", "closed": False,
+                "days": [{"date": date_str, "stage": c.get("stage"), "status": "蓄势",
+                          "turnover": c.get("latestTurnover"), "dayChg": None,
+                          "close": None, "prevVolRatio": c.get("prevVolRatio")}],
+                "lastDate": date_str,
+            })
+
+    _save_tracking(track)
+    open_cnt = sum(1 for e in entries if not e.get("closed"))
+    print("[track] 跟踪池更新 %s：在池 %d，累计 %d" % (date_str, open_cnt, len(entries)), flush=True)
+    return track
+
+
+def tracking_open():
+    """返回在池跟踪列表（未出池，按入池日倒序）。"""
+    track = load_tracking()
+    return [e for e in track["entries"] if not e.get("closed")]
 
 
 def compute_prev_premium(prev_rows):
@@ -3373,7 +3485,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not data:
                 self.send_json({"ok": False, "error": "未找到该日战法数据: %s" % date}, status=404)
                 return
-            self.send_json({"ok": True, **data})
+            self.send_json({"ok": True, **data, "tracking": tracking_open()})
             return
         if parsed.path == "/api/env/history":
             try:
