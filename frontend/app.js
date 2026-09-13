@@ -137,6 +137,26 @@
       (Number(s.amountStrength) || 0) >= 30 &&
       (Number(s.changePct) || 0) >= 3;
   }
+
+  // 选股原因：仅对特殊股生成文字（昨连板/抢筹/高分领涨），普通强势股返回空
+  function reasonOf(s) {
+    const prevLb = Number(s.prevLb) || 0;
+    const grab = isGrab(s);
+    const score = Number(s.score) || 0;
+    // 普通强势股（放量/高开但非连板非抢筹非高分）不显示，避免与状态列重复
+    if (prevLb === 0 && !grab && score < 85) return '';
+
+    if (prevLb >= 2) {
+      const isTop = (state.stocks[0] || {}).code === s.code;
+      return isTop ? '昨' + prevLb + '连板领涨，追高需谨慎' : '昨' + prevLb + '连板';
+    }
+    if (prevLb === 1) return '昨涨停';
+    const parts = [];
+    if (grab) parts.push('抢筹');
+    if ((Number(s.ratioToYesterday) || 0) >= 20) parts.push('大幅放量');
+    if ((Number(s.amountStrength) || 0) >= 30) parts.push('高金额强度');
+    return parts.join('+') || '高分';
+  }
   // ---------- 演示数据 ----------
   const SECTOR_DEFS = [
     ['半导体', 10], ['人工智能', 9], ['算力', 8], ['机器人', 8], ['低空经济', 6],
@@ -522,6 +542,7 @@
           <td>
             <div class="tag-group">${tags.map(t => `<span class="tag ${TAG_CLASS[t] || 'tag'}">${esc(t)}</span>`).join('')}</div>
           </td>
+          <td class="col-reason">${esc(reasonOf(s)) || '<span class="muted">—</span>'}</td>
         </tr>
       `;
     }).join('');

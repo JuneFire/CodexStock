@@ -1,0 +1,12 @@
+[Unit]
+Description=A股量化选股器
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/stock_system/CodexStock
+ExecStart=/root/venv/bin/python /opt/stock_system/CodexStock/backend/server.py
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
