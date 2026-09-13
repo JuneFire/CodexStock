@@ -1849,9 +1849,9 @@ input[type="search"] {
 /* ---------- 赚钱环境页 ---------- */
 .env-main {
   width: 100%;
-  max-width: 1100px;
+  max-width: none;
   margin: 0 auto;
-  padding: 16px;
+  padding: 14px 18px;
   gap: 14px;
 }
 
