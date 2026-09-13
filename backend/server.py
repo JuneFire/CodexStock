@@ -2968,18 +2968,19 @@ def scan_tactics(date_str):
         })
     out.sort(key=lambda x: (x.get("score") or 0), reverse=True)
     resonant = [c for c in out if (c.get("resonance") or {}).get("resonant")]
-    # 三方共振优先：有共振票时只输出共振票，否则回落到按分排序
-    picked = resonant if (resonant and rules.get("onlyResonant", True)) else out
-    picked = picked[:rules.get("topN", 20)]
+    others = [c for c in out if not (c.get("resonance") or {}).get("resonant")]
+    top_n = rules.get("topN", 20)
+    picked = resonant[:top_n]        # 三方共振：主列表
+    folded = others[:top_n]          # 孤军（非共振）：折叠区
     day = {"date": date_str, "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-           "scanned": len(cands), "resonantN": len(resonant),
-           "market": market_ctx, "candidates": picked}
+           "scanned": len(cands), "resonantN": len(resonant), "otherN": len(others),
+           "market": market_ctx, "candidates": picked, "others": folded}
     try:
         os.makedirs(TACTICS_DIR, exist_ok=True)
         with open(os.path.join(TACTICS_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
             json.dump(day, f, ensure_ascii=False)
-        print("[tactics] %s 扫描 %d 只首板/2板，三方共振 %d 只，入选 %d 只" % (
-            date_str, len(cands), len(resonant), len(picked)), flush=True)
+        print("[tactics] %s 扫描 %d 只首板/2板，三方共振 %d 只，孤军 %d 只" % (
+            date_str, len(cands), len(resonant), len(others)), flush=True)
         return True
     except Exception as exc:
         print("[tactics] %s 落盘失败: %r" % (date_str, exc), flush=True)

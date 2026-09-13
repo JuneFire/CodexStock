@@ -1945,3 +1945,14 @@ input[type="search"] {
 .hits-cell .tag { display: inline-block; margin: 1px 2px; }
 .stock-link { color: var(--accent-strong); text-decoration: none; font-weight: 600; }
 .stock-link:hover { text-decoration: underline; }
+
+/* 战法孤军折叠区 */
+.fold-panel { margin-top: 14px; }
+.fold-summary {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 11px 14px; cursor: pointer; font-size: 13px; font-weight: 600;
+  list-style: none;
+}
+.fold-summary::-webkit-details-marker { display: none; }
+.fold-summary::before { content: "▸ "; color: var(--text-3); }
+.fold-panel[open] .fold-summary::before { content: "▾ "; }

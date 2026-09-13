@@ -49,6 +49,9 @@
     tacticsMeta: $('#tacticsMeta'),
     tacticsBody: $('#tacticsBody'),
     tacticsEmpty: $('#tacticsEmpty'),
+    otherPanel: $('#otherPanel'),
+    otherMeta: $('#otherMeta'),
+    otherBody: $('#otherBody'),
     trackMeta: $('#trackMeta'),
     trackBody: $('#trackBody'),
     trackEmpty: $('#trackEmpty'),
@@ -91,6 +94,34 @@
     }
   }
 
+  function rowHtml(c, i, showReso) {
+    const stageCls = STAGE_CLS[c.stage] || 'tag';
+    const reso = c.resonance || {};
+    let badge = '';
+    if (showReso !== false && reso.resonant) {
+      badge = '<span class="tag tag-up" title="消息+板块+个股三方共振">三方共振</span>';
+    } else if (showReso === false) {
+      badge = '<span class="tag" title="板块无效应">孤军</span>';
+    }
+    const hits = (c.hits || []).map(h => `<span class="tag">${esc(h)}</span>`).join('');
+    const warns = (c.warns || []).map(w => `<span class="tag tag-down">${esc(w)}</span>`).join('');
+    return `
+      <tr>
+        <td class="num">${i + 1}</td>
+        <td class="stock-code"><a class="stock-link" href="${emUrl(c.code)}" target="_blank" rel="noopener">${esc(c.code)}</a></td>
+        <td>${codeLink(c.code, c.name)} <span class="stock-sector">${esc(c.industry)}</span></td>
+        <td class="num">${c.lb || 0}板</td>
+        <td class="num">${c.sectorZt || 0}只</td>
+        <td class="num">${c.latestTurnover != null ? fmtNum(c.latestTurnover, 1) + '%' : '—'}</td>
+        <td><span class="tag ${stageCls}">${esc(c.stage)}</span></td>
+        <td class="num">${c.prevVolRatio != null ? fmtNum(c.prevVolRatio, 1) + 'x' : '—'}</td>
+        <td class="num">${c.floatCapYi != null ? fmtNum(c.floatCapYi, 0) + '亿' : '—'}</td>
+        <td class="num">${c.upside != null ? fmtNum(c.upside * 100, 1) + '%' : '—'}</td>
+        <td class="hits-cell">${badge}${hits}${warns}</td>
+        <td class="num"><strong>${c.score || 0}</strong></td>
+      </tr>`;
+  }
+
   function render() {
     const d = state.data;
     if (!d) return;
@@ -110,30 +141,13 @@
     const cands = d.candidates || [];
     els.tacticsMeta.textContent = (d.scanned || 0) + ' 只候选 · 三方共振 ' + (d.resonantN || 0) + ' 只 → 前 ' + cands.length;
     els.tacticsEmpty.hidden = cands.length > 0;
-    els.tacticsBody.innerHTML = cands.map((c, i) => {
-      const stageCls = STAGE_CLS[c.stage] || 'tag';
-      const reso = c.resonance || {};
-      const resoBadge = reso.resonant
-        ? '<span class="tag tag-up" title="消息+板块+个股三方共振">三方共振</span>'
-        : '';
-      const hits = (c.hits || []).map(h => `<span class="tag">${esc(h)}</span>`).join('');
-      const warns = (c.warns || []).map(w => `<span class="tag tag-down">${esc(w)}</span>`).join('');
-      return `
-        <tr>
-          <td class="num">${i + 1}</td>
-          <td class="stock-code"><a class="stock-link" href="${emUrl(c.code)}" target="_blank" rel="noopener">${esc(c.code)}</a></td>
-          <td>${codeLink(c.code, c.name)} <span class="stock-sector">${esc(c.industry)}</span></td>
-          <td class="num">${c.lb || 0}板</td>
-          <td class="num">${c.sectorZt || 0}只</td>
-          <td class="num">${c.latestTurnover != null ? fmtNum(c.latestTurnover, 1) + '%' : '—'}</td>
-          <td><span class="tag ${stageCls}">${esc(c.stage)}</span></td>
-          <td class="num">${c.prevVolRatio != null ? fmtNum(c.prevVolRatio, 1) + 'x' : '—'}</td>
-          <td class="num">${c.floatCapYi != null ? fmtNum(c.floatCapYi, 0) + '亿' : '—'}</td>
-          <td class="num">${c.upside != null ? fmtNum(c.upside * 100, 1) + '%' : '—'}</td>
-          <td class="hits-cell">${resoBadge}${hits}${warns}</td>
-          <td class="num"><strong>${c.score || 0}</strong></td>
-        </tr>`;
-    }).join('');
+    els.tacticsBody.innerHTML = cands.map((c, i) => rowHtml(c, i)).join('');
+
+    // 孤军（非三方共振）折叠区
+    const others = d.others || [];
+    els.otherMeta.textContent = others.length + ' 只';
+    els.otherPanel.hidden = others.length === 0;
+    els.otherBody.innerHTML = others.map((c, i) => rowHtml(c, i, false)).join('');
     renderTracking(d.tracking || []);
     refreshIcons();
   }
