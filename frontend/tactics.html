@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>二板战法 · 量化选股器</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="tactics.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <a class="btn btn-ghost btn-sm" href="index.html" type="button">
+          <i data-lucide="arrow-left" aria-hidden="true"></i><span>返回</span>
+        </a>
+        <span class="brand-mark"><i data-lucide="target" aria-hidden="true"></i></span>
+        <div class="brand-text">
+          <h1>二板战法</h1>
+          <p id="tacticsStatus">—</p>
+        </div>
+      </div>
+      <div class="topbar-tools">
+        <button id="btnPrevDay" class="btn btn-ghost" type="button" data-tooltip="前一天"><i data-lucide="chevron-left" aria-hidden="true"></i></button>
+        <span id="tacticsDate" class="panel-meta">—</span>
+        <button id="btnNextDay" class="btn btn-ghost" type="button" data-tooltip="后一天"><i data-lucide="chevron-right" aria-hidden="true"></i></button>
+        <a class="btn" href="env.html" data-tooltip="赚钱环境"><i data-lucide="compass" aria-hidden="true"></i><span>环境</span></a>
+        <a class="btn" href="review.html" data-tooltip="情绪周期复盘"><i data-lucide="clipboard-list" aria-hidden="true"></i><span>复盘</span></a>
+      </div>
+    </header>
+
+    <main class="main env-main">
+      <div id="tacticsBanner" class="env-banner" hidden></div>
+
+      <section class="panel env-panel">
+        <div class="panel-head">
+          <h2>二板战法候选</h2>
+          <span id="tacticsMeta" class="panel-meta">—</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table" id="tacticsTable">
+            <thead>
+              <tr>
+                <th class="th-star" aria-label="序号"></th>
+                <th>代码</th>
+                <th>名称 / 题材</th>
+                <th>连板</th>
+                <th>板块</th>
+                <th>最新换手</th>
+                <th>换手阶段</th>
+                <th>倍量</th>
+                <th>流通盘</th>
+                <th>距前高</th>
+                <th>命中维度</th>
+                <th>得分</th>
+              </tr>
+            </thead>
+            <tbody id="tacticsBody"></tbody>
+          </table>
+        </div>
+        <div id="tacticsEmpty" class="horse-empty" hidden>暂无候选</div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

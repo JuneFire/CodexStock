@@ -31,6 +31,11 @@ try:
 except ImportError:  # tests 从项目根导入 backend.server 时兼容
     from backend import env_engine
 
+try:
+    import tactics_engine
+except ImportError:  # tests 从项目根导入 backend.server 时兼容
+    from backend import tactics_engine
+
 
 
 try:
@@ -51,6 +56,8 @@ MARKET_DAILY_DIR = os.path.join(DATA_DIR, "market_daily")  # 每日收盘市场�
 MARKET_INDICES_FILE = os.path.join(DATA_DIR, "market_indices.json")  # 指数收盘序列累积（供 MA）
 ENV_DIR = os.path.join(DATA_DIR, "env")  # 赚钱环境画像（env 页读）
 ENV_RULES_FILE = os.path.join(DATA_DIR, "env_rules.json")  # 环境判定阈值（用户可改）
+TACTICS_DIR = os.path.join(DATA_DIR, "tactics")  # 二板战法扫描结果
+TACTICS_RULES_FILE = os.path.join(DATA_DIR, "tactics_rules.json")  # 战法阈值（用户可改）
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -1666,6 +1673,7 @@ def _run_close_review():
         write_market_daily(date)  # 市场画像（成交集中度/中位数/指数序列），赚钱环境用
         save_env_json(date)  # 赚钱环境画像（四类打分）
         _run_preselect_node(date)  # 节点预选票：冰点/退潮日筛候选，并入 sentiment JSON
+        scan_tactics(date)  # 二板战法扫描：涨停首板/2板的技术面+换手率阶段
         print("[close] 当日复盘已自动生成并入库: %s" % date, flush=True)
     except Exception as exc:
         print("[close] 自动生成复盘失败: %r" % exc, flush=True)
@@ -2865,6 +2873,130 @@ def env_history(days=12):
     return rows
 
 
+# ---------- 二板战法扫描 ----------
+
+def _fetch_kline_full(code, start_date):
+    """腾讯日K(qfq)，返回升序 [{date,open,close,high,low,volume,turnover}]。失败 []。"""
+    if ak is None:
+        return []
+    import io
+    import contextlib
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            df = ak.stock_zh_a_hist_tx(symbol=_tx_symbol(code), start_date=start_date,
+                                       end_date=datetime.now().strftime("%Y%m%d"), adjust="qfq")
+        if df is None or df.empty:
+            return []
+        rows = []
+        for _, r in df.iterrows():
+            close = to_float(r.get("close"))
+            if close is None:
+                continue
+            rows.append({
+                "date": str(r.get("date"))[:10], "open": to_float(r.get("open")),
+                "close": close, "high": to_float(r.get("high")), "low": to_float(r.get("low")),
+                "volume": to_float(r.get("volume")), "turnover": to_float(r.get("turnover")),
+            })
+        return rows
+    except Exception:
+        return []
+
+
+def scan_tactics(date_str):
+    """二板战法扫描：候选=当日涨停首板/2板，逐只算技术面+换手率阶段，落 data/tactics/。"""
+    rows = _ztpool_rows(date_str)
+    if not rows:
+        print("[tactics] %s 无涨停池，跳过" % date_str, flush=True)
+        return False
+    rules = tactics_engine.load_rules(TACTICS_RULES_FILE)
+    # 候选：首板(lb=1) 或 2板(lb=2)
+    cands = [r for r in rows if (r.get("lb") or 0) in (1, 2)]
+    # 市场环境（供叠加）
+    env = load_env(date_str) or {}
+    concl = env.get("conclusion") or {}
+    market_ctx = {"envState": concl.get("state"), "envLabel": concl.get("label")}
+    start = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
+    # 板块共振：同行业当日涨停家数
+    sector_zt = {}
+    for r in rows:
+        ind = str(r.get("industry") or "").strip()
+        if ind:
+            sector_zt[ind] = sector_zt.get(ind, 0) + 1
+    # 流通市值（亿）：用全市场快照 ltsz（可靠），日K volume 单位不统一不可反推
+    cap_map = {}
+    try:
+        sdf = _get_spot_df(date_str)
+        for _, sr in sdf.iterrows():
+            c = _bare_code(sr.get("code"))
+            try:
+                cap_map[c] = round(float(sr.get("ltsz") or 0), 2)
+            except (TypeError, ValueError):
+                pass
+    except Exception as exc:
+        print("[tactics] 流通市值快照获取失败: %r" % exc, flush=True)
+    out = []
+    for r in cands:
+        code = r.get("code")
+        if not code:
+            continue
+        kline = _fetch_kline_full(code, start)
+        feats = tactics_engine.analyze_kline(kline, rules)
+        if not feats:
+            continue
+        if cap_map.get(code):
+            feats["floatCapYi"] = cap_map[code]
+        ind = str(r.get("industry") or "").strip()
+        s_zt = sector_zt.get(ind, 0)
+        stage, stage_desc = tactics_engine.judge_turnover_stage(feats.get("turnoverSeq") or [], rules)
+        score, hits, warns = tactics_engine.score_candidate(feats, stage, rules, sector_zt_count=s_zt)
+        out.append({
+            "code": code, "name": r.get("name") or "", "industry": r.get("industry") or "",
+            "lb": r.get("lb"), "sealAmount": r.get("sealAmount"), "sectorZt": s_zt,
+            "stage": stage, "stageDesc": stage_desc, "score": score,
+            "hits": hits, "warns": warns,
+            "latestTurnover": feats.get("latestTurnover"),
+            "turnoverSeq": feats.get("turnoverSeq"),
+            "bullishAlign": feats.get("bullishAlign"), "aboveMa60": feats.get("aboveMa60"),
+            "breakMa60": feats.get("breakMa60"), "boxWidth": feats.get("boxWidth"),
+            "maConverge": feats.get("maConverge"), "floatCapYi": feats.get("floatCapYi"),
+            "upside": feats.get("upside"), "volRatio": feats.get("volRatio"),
+            "prevVolRatio": feats.get("prevVolRatio"),
+        })
+    out.sort(key=lambda x: (x.get("score") or 0), reverse=True)
+    out = out[:rules.get("topN", 20)]
+    day = {"date": date_str, "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+           "scanned": len(cands), "market": market_ctx, "candidates": out}
+    try:
+        os.makedirs(TACTICS_DIR, exist_ok=True)
+        with open(os.path.join(TACTICS_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
+            json.dump(day, f, ensure_ascii=False)
+        print("[tactics] %s 扫描 %d 只首板/2板，入选 %d 只" % (date_str, len(cands), len(out)), flush=True)
+        return True
+    except Exception as exc:
+        print("[tactics] %s 落盘失败: %r" % (date_str, exc), flush=True)
+        return False
+
+
+def load_tactics(date_str):
+    path = os.path.join(TACTICS_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def list_tactics_dates():
+    if not os.path.isdir(TACTICS_DIR):
+        return []
+    try:
+        return sorted(n[:-5] for n in os.listdir(TACTICS_DIR) if n.endswith(".json"))[::-1]
+    except OSError:
+        return []
+
+
 def compute_prev_premium(prev_rows):
     """昨涨停溢价 = prev 池全部涨跌幅均值；连板溢价 = 昨日连板数>=2 均值。"""
     all_chg = [to_float(s.get("changePct")) for s in prev_rows]
@@ -3224,6 +3356,24 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/env/dates":
             self.send_json({"ok": True, "dates": list_env_dates()})
+            return
+        if parsed.path == "/api/tactics/dates":
+            self.send_json({"ok": True, "dates": list_tactics_dates()})
+            return
+        if parsed.path == "/api/tactics":
+            qs = parse_qs(parsed.query)
+            date = (qs.get("date") or [""])[0]
+            if not date:
+                dates = list_tactics_dates()
+                date = dates[0] if dates else ""
+            if not date:
+                self.send_json({"ok": False, "error": "暂无战法扫描数据"}, status=404)
+                return
+            data = load_tactics(date)
+            if not data:
+                self.send_json({"ok": False, "error": "未找到该日战法数据: %s" % date}, status=404)
+                return
+            self.send_json({"ok": True, **data})
             return
         if parsed.path == "/api/env/history":
             try:
