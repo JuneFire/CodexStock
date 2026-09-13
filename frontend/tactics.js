@@ -101,7 +101,7 @@
     if (showReso !== false && reso.resonant) {
       badge = '<span class="tag tag-up" title="消息+板块+个股三方共振">三方共振</span>';
     } else if (showReso === false) {
-      badge = '<span class="tag" title="板块无效应">孤军</span>';
+      badge = '<span class="tag" title="非三方共振（板块热度或个股技术面不足）">孤军</span>';
     }
     const hits = (c.hits || []).map(h => `<span class="tag">${esc(h)}</span>`).join('');
     const warns = (c.warns || []).map(w => `<span class="tag tag-down">${esc(w)}</span>`).join('');
