@@ -37,8 +37,15 @@ DEFAULT_RULES = {
         "volDouble": 15,         # 首板/二板倍量
     },
     "sectorResonanceMin": 2,   # 同行业涨停家数达到此值算板块共振
+    "messageZtMin": 3,         # 消息共振：同行业涨停 ≥ 此值（板块热度高=有题材催化）
+    "resonanceTechMin": 2,     # 个股共振：技术面核心维度至少命中几项
+    "onlyResonant": True,      # 只输出三方共振标的（凑不齐时回落按分排序）
     "topN": 20,
 }
+
+# 个股"技术面核心"维度前缀（用于三方共振的个股判定）
+TECH_DIM_PREFIXES = ("多头排列", "站上60线", "突破60线", "横盘箱体", "均线粘合", "倍量")
+HEALTHY_STAGES = ("首板健康", "抬升", "缩量加速")
 
 
 def _deep_merge(base, over):
@@ -194,3 +201,19 @@ def score_candidate(features, stage, rules, sector_zt_count=0):
     elif stage == "放量兑现":
         sc += w["stageBurst"]; warns.append("放量兑现(顶部风险)")
     return max(0, min(100, sc)), hits, warns
+
+
+def judge_resonance(hits, stage, sector_zt_count, rules):
+    """三方共振判定：消息面 + 板块 + 个股。
+
+    - 个股：技术面核心维度命中 ≥ resonanceTechMin 且换手阶段健康
+    - 板块：同行业涨停 ≥ sectorResonanceMin
+    - 消息：同行业涨停 ≥ messageZtMin（板块热度高，视为有题材催化）
+    返回 {"stock","sector","news","resonant"}。
+    """
+    tech_n = sum(1 for h in hits if str(h).startswith(TECH_DIM_PREFIXES))
+    stock_ok = tech_n >= rules["resonanceTechMin"] and stage in HEALTHY_STAGES
+    sector_ok = (sector_zt_count or 0) >= rules["sectorResonanceMin"]
+    news_ok = (sector_zt_count or 0) >= rules["messageZtMin"]
+    return {"stock": stock_ok, "sector": sector_ok, "news": news_ok,
+            "resonant": stock_ok and sector_ok and news_ok, "techN": tech_n}

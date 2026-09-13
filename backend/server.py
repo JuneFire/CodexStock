@@ -60,7 +60,6 @@ TACTICS_DIR = os.path.join(DATA_DIR, "tactics")  # 二板战法扫描结果
 TACTICS_RULES_FILE = os.path.join(DATA_DIR, "tactics_rules.json")  # 战法阈值（用户可改）
 TRACK_FILE = os.path.join(DATA_DIR, "tactics", "track.json")  # 二板战法跨日跟踪池
 TRACK_DAYS = 7  # 跟踪保留交易日数
-TRACK_MIN_SCORE = 80  # 入池最低分
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -2953,11 +2952,12 @@ def scan_tactics(date_str):
         s_zt = sector_zt.get(ind, 0)
         stage, stage_desc = tactics_engine.judge_turnover_stage(feats.get("turnoverSeq") or [], rules)
         score, hits, warns = tactics_engine.score_candidate(feats, stage, rules, sector_zt_count=s_zt)
+        reso = tactics_engine.judge_resonance(hits, stage, s_zt, rules)
         out.append({
             "code": code, "name": r.get("name") or "", "industry": r.get("industry") or "",
             "lb": r.get("lb"), "sealAmount": r.get("sealAmount"), "sectorZt": s_zt,
             "stage": stage, "stageDesc": stage_desc, "score": score,
-            "hits": hits, "warns": warns,
+            "hits": hits, "warns": warns, "resonance": reso,
             "latestTurnover": feats.get("latestTurnover"),
             "turnoverSeq": feats.get("turnoverSeq"),
             "bullishAlign": feats.get("bullishAlign"), "aboveMa60": feats.get("aboveMa60"),
@@ -2967,14 +2967,19 @@ def scan_tactics(date_str):
             "prevVolRatio": feats.get("prevVolRatio"),
         })
     out.sort(key=lambda x: (x.get("score") or 0), reverse=True)
-    out = out[:rules.get("topN", 20)]
+    resonant = [c for c in out if (c.get("resonance") or {}).get("resonant")]
+    # 三方共振优先：有共振票时只输出共振票，否则回落到按分排序
+    picked = resonant if (resonant and rules.get("onlyResonant", True)) else out
+    picked = picked[:rules.get("topN", 20)]
     day = {"date": date_str, "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-           "scanned": len(cands), "market": market_ctx, "candidates": out}
+           "scanned": len(cands), "resonantN": len(resonant),
+           "market": market_ctx, "candidates": picked}
     try:
         os.makedirs(TACTICS_DIR, exist_ok=True)
         with open(os.path.join(TACTICS_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
             json.dump(day, f, ensure_ascii=False)
-        print("[tactics] %s 扫描 %d 只首板/2板，入选 %d 只" % (date_str, len(cands), len(out)), flush=True)
+        print("[tactics] %s 扫描 %d 只首板/2板，三方共振 %d 只，入选 %d 只" % (
+            date_str, len(cands), len(resonant), len(picked)), flush=True)
         return True
     except Exception as exc:
         print("[tactics] %s 落盘失败: %r" % (date_str, exc), flush=True)
@@ -3078,15 +3083,15 @@ def update_tracking(date_str):
             e["exitDate"] = date_str
             e["exitReason"] = status if status in ("兑现", "转弱") else "到期"
 
-    # 2. 加入今日入选（未在池、未出池过）
+    # 2. 加入今日入选（三方共振票；未在池、未出池过）
     today = load_tactics(date_str)
     if today:
         for c in today.get("candidates") or []:
             code = c.get("code")
             if not code or code in by_code:
                 continue
-            if (c.get("score") or 0) < TRACK_MIN_SCORE:
-                continue
+            if not (c.get("resonance") or {}).get("resonant"):
+                continue  # 只跟踪三方共振标的
             entries.append({
                 "code": code, "name": c.get("name"), "industry": c.get("industry"),
                 "entryDate": date_str, "entryLb": c.get("lb"), "entryScore": c.get("score"),

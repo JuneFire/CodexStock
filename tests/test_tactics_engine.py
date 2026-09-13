@@ -115,5 +115,43 @@ class TestScoreCandidate(unittest.TestCase):
         self.assertFalse(any("倍量" in h for h in hits))
 
 
+class TestResonance(unittest.TestCase):
+    def setUp(self):
+        self.rules = tactics_engine.load_rules(None)
+
+    def test_full_resonance(self):
+        hits = ["多头排列", "站上60线", "倍量2.5x"]
+        r = tactics_engine.judge_resonance(hits, "抬升", 3, self.rules)
+        self.assertTrue(r["stock"])
+        self.assertTrue(r["sector"])
+        self.assertTrue(r["news"])
+        self.assertTrue(r["resonant"])
+
+    def test_sector_weak_not_resonant(self):
+        hits = ["多头排列", "站上60线", "倍量2.5x"]
+        r = tactics_engine.judge_resonance(hits, "抬升", 1, self.rules)
+        self.assertFalse(r["sector"])
+        self.assertFalse(r["resonant"])
+
+    def test_message_needs_3(self):
+        hits = ["多头排列", "站上60线"]
+        r = tactics_engine.judge_resonance(hits, "抬升", 2, self.rules)
+        self.assertTrue(r["sector"])   # ≥2
+        self.assertFalse(r["news"])   # <3
+        self.assertFalse(r["resonant"])
+
+    def test_tech_insufficient(self):
+        hits = ["多头排列"]  # 只有1项技术面
+        r = tactics_engine.judge_resonance(hits, "抬升", 5, self.rules)
+        self.assertFalse(r["stock"])
+        self.assertFalse(r["resonant"])
+
+    def test_burst_stage_not_healthy(self):
+        hits = ["多头排列", "站上60线", "倍量2.5x"]
+        r = tactics_engine.judge_resonance(hits, "放量兑现", 5, self.rules)
+        self.assertFalse(r["stock"])  # 放量兑现非健康阶段
+        self.assertFalse(r["resonant"])
+
+
 if __name__ == "__main__":
     unittest.main()

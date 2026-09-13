@@ -34,10 +34,12 @@ class TrackingTest(unittest.TestCase):
         if os.path.exists(self.path):
             os.remove(self.path)
 
-    def _today(self, code="600001", score=90):
+    def _today(self, code="600001", resonant=True):
         return {"candidates": [{"code": code, "name": "测试股", "industry": "半导体",
-                                "lb": 1, "score": score, "stage": "首板健康",
-                                "latestTurnover": 4.9, "prevVolRatio": 2.5}]}
+                                "lb": 1, "score": 90, "stage": "首板健康",
+                                "latestTurnover": 4.9, "prevVolRatio": 2.5,
+                                "resonance": {"stock": True, "sector": True, "news": True,
+                                              "resonant": resonant}}]}
 
     def test_new_entry_added(self):
         with mock.patch.object(server, "load_tactics", return_value=self._today()), \
@@ -49,8 +51,8 @@ class TrackingTest(unittest.TestCase):
         self.assertFalse(t["entries"][0]["closed"])
         self.assertEqual(len(server.tracking_open()), 1)
 
-    def test_low_score_not_added(self):
-        with mock.patch.object(server, "load_tactics", return_value=self._today(score=50)), \
+    def test_non_resonant_not_added(self):
+        with mock.patch.object(server, "load_tactics", return_value=self._today(resonant=False)), \
              mock.patch.object(server, "_fetch_kline_full", return_value=kline_with([0.05, 0.05])):
             server.update_tracking("2026-01-02")
         self.assertEqual(len(server.load_tracking()["entries"]), 0)
