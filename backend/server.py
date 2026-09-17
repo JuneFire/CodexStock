@@ -67,6 +67,8 @@ TRACK_FILE = os.path.join(DATA_DIR, "tactics", "track.json")  # 二板战法跨�
 TRACK_DAYS = 7  # 跟踪保留交易日数
 MONEY_DIR = os.path.join(DATA_DIR, "money")  # 赚钱效应双线每日指数
 MONEY_RULES_FILE = os.path.join(DATA_DIR, "money_rules.json")  # 赚钱效应阈值（用户可改）
+LEADERSHIP_DIR = os.path.join(DATA_DIR, "leadership")  # 卡位晋级检测
+CONGESTION_DIR = os.path.join(DATA_DIR, "congestion")  # 量窒息检测
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -1685,6 +1687,8 @@ def _run_close_review():
         scan_tactics(date)  # 二板战法扫描：涨停首板/2板的技术面+换手率阶段
         update_tracking(date)  # 二板战法跨日跟踪池（保留7个交易日）
         save_money_day(date, overwrite=True)  # 赚钱效应双线指数
+        scan_leadership(date)  # 卡位晋级检测
+        scan_congestion(date)  # 量窒息（缩量横盘）检测
         print("[close] 当日复盘已自动生成并入库: %s" % date, flush=True)
     except Exception as exc:
         print("[close] 自动生成复盘失败: %r" % exc, flush=True)
@@ -3016,6 +3020,100 @@ def list_tactics_dates():
         return []
 
 
+# ---------- 卡位晋级检测 ----------
+
+def scan_leadership(date_str, save=True):
+    """对比昨日/今日涨停池，判定晋级 / 卡位晋级 / 被卡位。落 data/leadership/。"""
+    prev_date = _prev_data_date(ZTPOOL_DIR, date_str)
+    prev_rows = _ztpool_rows(prev_date) if prev_date else []
+    today_rows = _ztpool_rows(date_str)
+    if not today_rows:
+        return None
+    res = tactics_engine.judge_leadership(prev_rows, today_rows)
+    res["date"] = date_str
+    res["prevDate"] = prev_date
+    if save and prev_date:
+        try:
+            os.makedirs(LEADERSHIP_DIR, exist_ok=True)
+            with open(os.path.join(LEADERSHIP_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
+                json.dump(res, f, ensure_ascii=False)
+            print("[leadership] %s 晋级 %d 只（卡位 %d），被卡位 %d 只" % (
+                date_str, len(res["promotions"]),
+                sum(1 for p in res["promotions"] if p["type"] == "卡位晋级"),
+                len(res["lostSlots"])), flush=True)
+        except Exception as exc:
+            print("[leadership] %s 落盘失败: %r" % (date_str, exc), flush=True)
+    return res
+
+
+def load_leadership(date_str):
+    path = os.path.join(LEADERSHIP_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+# ---------- 量窒息（缩量横盘）检测 ----------
+
+def scan_congestion(date_str, save=True):
+    """在强势票范围（今日涨停 ∪ 战法候选 ∪ 跟踪池）中找缩量横盘。落 data/congestion/。"""
+    rules = tactics_engine.CONGESTION_RULES
+    names = {}
+    codes = []
+
+    def _add(code, name, industry):
+        code = str(code or "").zfill(6)
+        if not code or code in names:
+            return
+        names[code] = {"name": name or "", "industry": industry or ""}
+        codes.append(code)
+
+    for r in _ztpool_rows(date_str):
+        _add(r.get("code"), r.get("name"), r.get("industry"))
+    tac = load_tactics(date_str) or {}
+    for c in (tac.get("candidates") or []) + (tac.get("others") or []):
+        _add(c.get("code"), c.get("name"), c.get("industry"))
+    for e in tracking_open():
+        _add(e.get("code"), e.get("name"), e.get("industry"))
+    if not codes:
+        return None
+    start = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
+    out = []
+    for code in codes:
+        kline = _fetch_kline_full(code, start)
+        res = tactics_engine.judge_congestion(kline, rules)
+        if not res:
+            continue
+        out.append({"code": code, "name": names[code]["name"], "industry": names[code]["industry"], **res})
+    out.sort(key=lambda x: (x.get("score") or 0), reverse=True)
+    day = {"date": date_str, "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+           "scanned": len(codes), "candidates": out}
+    if save:
+        try:
+            os.makedirs(CONGESTION_DIR, exist_ok=True)
+            with open(os.path.join(CONGESTION_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
+                json.dump(day, f, ensure_ascii=False)
+            print("[congestion] %s 扫描 %d 只，量窒息 %d 只" % (date_str, len(codes), len(out)), flush=True)
+        except Exception as exc:
+            print("[congestion] %s 落盘失败: %r" % (date_str, exc), flush=True)
+    return day
+
+
+def load_congestion(date_str):
+    path = os.path.join(CONGESTION_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 # ---------- 二板战法跨日跟踪池 ----------
 
 def load_tracking():
@@ -3650,7 +3748,32 @@ class Handler(SimpleHTTPRequestHandler):
             if not data:
                 self.send_json({"ok": False, "error": "未找到该日战法数据: %s" % date}, status=404)
                 return
-            self.send_json({"ok": True, **data, "tracking": tracking_open()})
+            self.send_json({"ok": True, **data, "tracking": tracking_open(),
+                            "leadership": load_leadership(date),
+                            "congestion": load_congestion(date)})
+            return
+        if parsed.path == "/api/leadership":
+            date = (parse_qs(parsed.query).get("date") or [""])[0]
+            if not date:
+                dates = list_tactics_dates()
+                date = dates[0] if dates else ""
+            if not date:
+                self.send_json({"ok": False, "error": "缺少 date 参数"}, status=400)
+                return
+            data = load_leadership(date)
+            self.send_json({"ok": True, "date": date, **(data or {"promotions": [], "lostSlots": []})})
+            return
+        if parsed.path == "/api/congestion":
+            date = (parse_qs(parsed.query).get("date") or [""])[0]
+            if not date:
+                dates = list_tactics_dates()
+                date = dates[0] if dates else ""
+            if not date:
+                self.send_json({"ok": False, "error": "缺少 date 参数"}, status=400)
+                return
+            data = load_congestion(date)
+            self.send_json({"ok": True, "date": date, "candidates": (data or {}).get("candidates") or [],
+                            "scanned": (data or {}).get("scanned")})
             return
         if parsed.path == "/api/env/history":
             try:

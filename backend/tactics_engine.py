@@ -217,3 +217,99 @@ def judge_resonance(hits, stage, sector_zt_count, rules):
     news_ok = (sector_zt_count or 0) >= rules["messageZtMin"]
     return {"stock": stock_ok, "sector": sector_ok, "news": news_ok,
             "resonant": stock_ok and sector_ok and news_ok, "techN": tech_n}
+
+
+# ---------- 卡位晋级（梯队位置） ----------
+
+def judge_leadership(prev_rows, today_rows):
+    """对比昨日/今日涨停池，判定晋级 / 卡位晋级 / 被卡位。
+
+    - 晋级：昨日 N 板 → 今日 N+1 板（位置没变、顺利上）
+    - 卡位晋级：今日晋级者昨日板位 < 昨日最高断板票板位（后排挤掉前排）
+    - 被卡位：昨日高位票(>=2)今日断板，且今日存在卡位晋级 → 拉升只有卖点
+
+    返回 {"promotions":[...], "lostSlots":[...]}。
+    """
+    P = {r["code"]: r for r in (prev_rows or []) if r.get("code") and (r.get("lb") or 0) >= 1}
+    T = {r["code"]: r for r in (today_rows or []) if r.get("code") and (r.get("lb") or 0) >= 1}
+    promotions = []
+    for code, t in T.items():
+        p = P.get(code)
+        if not p:
+            continue
+        prev_lb = p.get("lb") or 0
+        today_lb = t.get("lb") or 0
+        if today_lb == prev_lb + 1:
+            promotions.append({
+                "code": code, "name": t.get("name") or p.get("name") or "",
+                "industry": t.get("industry") or p.get("industry") or "",
+                "prevLb": prev_lb, "todayLb": today_lb, "type": "晋级",
+            })
+    broken = [p for code, p in P.items() if code not in T]
+    max_broken_lb = max([p.get("lb") or 0 for p in broken if (p.get("lb") or 0) >= 2], default=None)
+    has_kakwei = False
+    for pr in promotions:
+        if max_broken_lb is not None and pr["prevLb"] < max_broken_lb:
+            pr["type"] = "卡位晋级"
+            has_kakwei = True
+    lost = []
+    if has_kakwei:
+        for p in broken:
+            if (p.get("lb") or 0) >= 2:
+                lost.append({
+                    "code": p.get("code"), "name": p.get("name") or "",
+                    "industry": p.get("industry") or "", "prevLb": p.get("lb") or 0,
+                    "note": "被卡位·拉升只卖",
+                })
+    promotions.sort(key=lambda x: (x.get("todayLb") or 0), reverse=True)
+    lost.sort(key=lambda x: (x.get("prevLb") or 0), reverse=True)
+    return {"promotions": promotions, "lostSlots": lost}
+
+
+# 量窒息（缩量横盘）默认阈值
+CONGESTION_RULES = {
+    "volShrinkMax": 0.75,   # 近5日均量 / 近20日均量 < 此值 = 量能萎缩
+    "ampMax": 0.10,         # 近5日 (最高-最低)/最低 < 此值 = 振幅收窄
+    "nearMaMax": 0.04,      # |close-MA20|/MA20 < 此值 = 近支撑
+    "score": {"shrink": 40, "amp": 30, "red": 15, "nearMa": 15},
+}
+
+
+def judge_congestion(feats, rules=None):
+    """量窒息判定：量能萎缩 且 振幅收窄（核心）；收红 + 近MA20 加分。
+
+    需 feats 含 closes/highs/lows/vols/open 等；此处直接用日K行计算。
+    """
+    r = rules or CONGESTION_RULES
+    if not feats or len(feats) < 21:
+        return None
+    vols = [x.get("volume") or 0 for x in feats]
+    highs = [x.get("high") for x in feats if x.get("high") is not None]
+    lows = [x.get("low") for x in feats if x.get("low") is not None]
+    closes = [x.get("close") for x in feats if x.get("close") is not None]
+    if len(closes) < 21 or len(highs) < 6 or len(lows) < 6:
+        return None
+    v5 = sum(vols[-5:]) / 5 if sum(vols[-5:]) else 0
+    v20 = sum(vols[-20:]) / 20 if sum(vols[-20:]) else 0
+    vol_shrink = (v5 / v20) if v20 > 0 else None
+    h5, l5 = max(highs[-5:]), min(lows[-5:])
+    amplitude = (h5 - l5) / l5 if l5 else None
+    ma20 = sum(closes[-20:]) / 20
+    close = closes[-1]
+    near_ma = abs(close - ma20) / ma20 if ma20 else None
+    last = feats[-1]
+    red = (last.get("close") is not None and last.get("open") is not None
+           and last["close"] > last["open"])
+    shrink_ok = vol_shrink is not None and vol_shrink < r["volShrinkMax"]
+    amp_ok = amplitude is not None and amplitude < r["ampMax"]
+    if not (shrink_ok and amp_ok):
+        return None
+    sc = r["score"]["shrink"] + r["score"]["amp"]
+    hits = ["量能萎缩%.2f" % vol_shrink, "振幅%.1f%%" % (amplitude * 100)]
+    if red:
+        sc += r["score"]["red"]; hits.append("收红")
+    if near_ma is not None and near_ma < r["nearMaMax"]:
+        sc += r["score"]["nearMa"]; hits.append("近MA20")
+    return {"volShrink": round(vol_shrink, 3), "amplitude": round(amplitude, 4),
+            "nearMa": round(near_ma, 4) if near_ma is not None else None,
+            "red": red, "score": sc, "hits": hits}

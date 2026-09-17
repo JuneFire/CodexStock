@@ -52,6 +52,14 @@
     otherPanel: $('#otherPanel'),
     otherMeta: $('#otherMeta'),
     otherBody: $('#otherBody'),
+    leadMeta: $('#leadMeta'),
+    leadBody: $('#leadBody'),
+    leadEmpty: $('#leadEmpty'),
+    lostWrap: $('#lostWrap'),
+    lostBody: $('#lostBody'),
+    congMeta: $('#congMeta'),
+    congBody: $('#congBody'),
+    congEmpty: $('#congEmpty'),
     trackMeta: $('#trackMeta'),
     trackBody: $('#trackBody'),
     trackEmpty: $('#trackEmpty'),
@@ -149,7 +157,49 @@
     els.otherPanel.hidden = others.length === 0;
     els.otherBody.innerHTML = others.map((c, i) => rowHtml(c, i, false)).join('');
     renderTracking(d.tracking || []);
+    renderLeadership(d.leadership);
+    renderCongestion(d.congestion);
     refreshIcons();
+  }
+
+  function renderLeadership(data) {
+    const promos = (data && data.promotions) || [];
+    const lost = (data && data.lostSlots) || [];
+    els.leadMeta.textContent = data ? (promos.length + ' 只晋级（卡位 ' + promos.filter(p => p.type === '卡位晋级').length + '）') : '—';
+    els.leadEmpty.hidden = promos.length > 0;
+    els.leadBody.innerHTML = promos.map(p => `
+      <tr>
+        <td class="stock-code"><a class="stock-link" href="${emUrl(p.code)}" target="_blank" rel="noopener">${esc(p.code)}</a></td>
+        <td>${codeLink(p.code, p.name)} <span class="stock-sector">${esc(p.industry || '')}</span></td>
+        <td class="num">${p.prevLb}板</td>
+        <td class="num"><strong>${p.todayLb}板</strong></td>
+        <td><span class="tag ${p.type === '卡位晋级' ? 'tag-up' : 'tag'}">${esc(p.type)}</span></td>
+      </tr>`).join('');
+    els.lostWrap.hidden = lost.length === 0;
+    els.lostBody.innerHTML = lost.map(l => `
+      <tr>
+        <td class="stock-code"><a class="stock-link" href="${emUrl(l.code)}" target="_blank" rel="noopener">${esc(l.code)}</a></td>
+        <td>${codeLink(l.code, l.name)} <span class="stock-sector">${esc(l.industry || '')}</span></td>
+        <td class="num">昨${l.prevLb}板</td>
+        <td><span class="tag tag-down">${esc(l.note || '被卡位')}</span></td>
+      </tr>`).join('');
+  }
+
+  function renderCongestion(data) {
+    const cands = (data && data.candidates) || [];
+    els.congMeta.textContent = data ? ('扫描 ' + (data.scanned || 0) + ' 只 · 命中 ' + cands.length) : '（待收盘计算）';
+    els.congEmpty.hidden = cands.length > 0;
+    els.congBody.innerHTML = cands.map(c => `
+      <tr>
+        <td class="stock-code"><a class="stock-link" href="${emUrl(c.code)}" target="_blank" rel="noopener">${esc(c.code)}</a></td>
+        <td>${codeLink(c.code, c.name)} <span class="stock-sector">${esc(c.industry || '')}</span></td>
+        <td class="num">${fmtNum(c.volShrink, 2)}</td>
+        <td class="num">${fmtNum((c.amplitude || 0) * 100, 1)}%</td>
+        <td class="num">${c.nearMa != null ? fmtNum(c.nearMa * 100, 1) + '%' : '—'}</td>
+        <td class="num">${c.red ? '红' : '—'}</td>
+        <td>${(c.hits || []).map(h => `<span class="tag">${esc(h)}</span>`).join('')}</td>
+        <td class="num"><strong>${c.score || 0}</strong></td>
+      </tr>`).join('');
   }
 
   const TRACK_STAGE_CLS = {

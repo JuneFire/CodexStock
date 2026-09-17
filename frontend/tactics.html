@@ -106,6 +106,46 @@
         </div>
         <div id="trackEmpty" class="horse-empty" hidden>暂无跟踪标的</div>
       </section>
+
+      <section class="panel env-panel">
+        <div class="panel-head">
+          <h2>梯队 · 卡位晋级</h2>
+          <span id="leadMeta" class="panel-meta">—</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table" id="leadTable">
+            <thead>
+              <tr><th>代码</th><th>名称 / 题材</th><th>昨日</th><th>今日</th><th>类型</th></tr>
+            </thead>
+            <tbody id="leadBody"></tbody>
+          </table>
+        </div>
+        <div id="leadEmpty" class="horse-empty" hidden>暂无晋级数据</div>
+        <div id="lostWrap" hidden>
+          <div class="panel-head sub"><h3>被卡位（拉升只有卖点）</h3></div>
+          <div class="table-responsive">
+            <table class="table">
+              <tbody id="lostBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel env-panel">
+        <div class="panel-head">
+          <h2>量窒息 · 缩量横盘</h2>
+          <span id="congMeta" class="panel-meta">—</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table" id="congTable">
+            <thead>
+              <tr><th>代码</th><th>名称 / 题材</th><th>量能萎缩</th><th>振幅</th><th>近MA20</th><th>收红</th><th>命中</th><th>得分</th></tr>
+            </thead>
+            <tbody id="congBody"></tbody>
+          </table>
+        </div>
+        <div id="congEmpty" class="horse-empty" hidden>暂无量窒息标的</div>
+      </section>
     </main>
   </div>
 
