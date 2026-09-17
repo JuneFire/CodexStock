@@ -3186,13 +3186,18 @@ def money_effect_day(date_str):
     day = _money_day_from_pools(date_str)
     if not day:
         return None
-    # 若当日有全市场快照（今天），补涨跌家数
-    try:
-        p = fetch_market_profile(date_str)
-        day["up"] = p.get("up")
-        day["down"] = p.get("down")
-    except Exception:
-        pass
+    # 涨跌家数：优先该日 market_daily 存档；仅当查询的是"今天"才用实时快照（避免把今天的家数贴到历史日）
+    md = _load_market_daily(date_str)
+    if md and md.get("up") is not None:
+        day["up"] = md.get("up")
+        day["down"] = md.get("down")
+    elif date_str == datetime.now().strftime("%Y-%m-%d"):
+        try:
+            p = fetch_market_profile(date_str)
+            day["up"] = p.get("up")
+            day["down"] = p.get("down")
+        except Exception:
+            pass
     rules = money_engine.load_rules(MONEY_RULES_FILE)
     res = money_engine.compute(day, rules)
     res["savedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
