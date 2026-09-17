@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>赚钱效应 · 量化选股器</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="money.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <a class="btn btn-ghost btn-sm" href="index.html" type="button">
+          <i data-lucide="arrow-left" aria-hidden="true"></i><span>返回</span>
+        </a>
+        <span class="brand-mark"><i data-lucide="trending-up" aria-hidden="true"></i></span>
+        <div class="brand-text">
+          <h1>赚钱效应</h1>
+          <p id="moneyStatus">—</p>
+        </div>
+      </div>
+      <div class="topbar-tools">
+        <select id="daysSel" class="field" style="width:auto;height:32px">
+          <option value="20">近20日</option>
+          <option value="30" selected>近30日</option>
+          <option value="60">近60日</option>
+        </select>
+        <button id="btnBackfill" class="btn btn-primary" type="button" data-tooltip="从东财回填最近可用历史（约2周）">
+          <i data-lucide="download-cloud" aria-hidden="true"></i><span>回填历史</span>
+        </button>
+        <a class="btn" href="env.html" data-tooltip="赚钱环境"><i data-lucide="compass" aria-hidden="true"></i><span>环境</span></a>
+        <a class="btn" href="tactics.html" data-tooltip="二板战法"><i data-lucide="target" aria-hidden="true"></i><span>战法</span></a>
+      </div>
+    </header>
+
+    <main class="main env-main">
+      <div id="moneyBanner" class="env-banner" hidden></div>
+
+      <section class="panel env-panel">
+        <div class="panel-head">
+          <h2>赚钱效应曲线</h2>
+          <span class="panel-meta"><span class="legend-short">■</span> 短线打板效应　<span class="legend-market">■</span> 大盘赚钱效应　虚线=50中轴</span>
+        </div>
+        <div id="moneyChart" class="money-chart"></div>
+        <div id="moneyHint" class="money-hint">—</div>
+      </section>
+
+      <section class="panel env-panel">
+        <div class="panel-head"><h2>日明细</h2><span id="moneyMeta" class="panel-meta">—</span></div>
+        <div class="table-responsive">
+          <table class="table" id="moneyTable">
+            <thead>
+              <tr>
+                <th>日期</th><th>短线效应</th><th>大盘效应</th>
+                <th>隔日溢价</th><th>连板晋级率</th><th>首板→2板</th>
+                <th>涨跌停比</th><th>涨跌家数</th><th>量能较昨</th>
+              </tr>
+            </thead>
+            <tbody id="moneyBody"></tbody>
+          </table>
+        </div>
+        <div id="moneyEmpty" class="horse-empty" hidden>暂无数据，点上方"回填历史"或等每日收盘累积</div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

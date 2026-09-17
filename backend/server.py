@@ -36,6 +36,11 @@ try:
 except ImportError:  # tests 从项目根导入 backend.server 时兼容
     from backend import tactics_engine
 
+try:
+    import money_engine
+except ImportError:  # tests 从项目根导入 backend.server 时兼容
+    from backend import money_engine
+
 
 
 try:
@@ -60,6 +65,8 @@ TACTICS_DIR = os.path.join(DATA_DIR, "tactics")  # 二板战法扫描结果
 TACTICS_RULES_FILE = os.path.join(DATA_DIR, "tactics_rules.json")  # 战法阈值（用户可改）
 TRACK_FILE = os.path.join(DATA_DIR, "tactics", "track.json")  # 二板战法跨日跟踪池
 TRACK_DAYS = 7  # 跟踪保留交易日数
+MONEY_DIR = os.path.join(DATA_DIR, "money")  # 赚钱效应双线每日指数
+MONEY_RULES_FILE = os.path.join(DATA_DIR, "money_rules.json")  # 赚钱效应阈值（用户可改）
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -1677,6 +1684,7 @@ def _run_close_review():
         _run_preselect_node(date)  # 节点预选票：冰点/退潮日筛候选，并入 sentiment JSON
         scan_tactics(date)  # 二板战法扫描：涨停首板/2板的技术面+换手率阶段
         update_tracking(date)  # 二板战法跨日跟踪池（保留7个交易日）
+        save_money_day(date, overwrite=True)  # 赚钱效应双线指数
         print("[close] 当日复盘已自动生成并入库: %s" % date, flush=True)
     except Exception as exc:
         print("[close] 自动生成复盘失败: %r" % exc, flush=True)
@@ -3115,6 +3123,138 @@ def tracking_open():
     return [e for e in track["entries"] if not e.get("closed")]
 
 
+# ---------- 赚钱效应双线 ----------
+
+def _avg(vals):
+    vals = [v for v in vals if v is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _amount_chg_pct(date_str):
+    """两市成交额较上一交易日 %。取指数日K的沪深合计。失败 None。"""
+    try:
+        idx = fetch_indices_kline(date_str)
+    except Exception:
+        return None
+    for i in idx:
+        v = i.get("marketAmountChangePct")
+        if v is not None:
+            return v
+    return None
+
+
+def _money_day_from_pools(date_str):
+    """用东财涨停池/昨涨停池/跌停池 + 指数量能构造当日赚钱效应输入。
+
+    回填与日常兜底通用（不依赖历史快照）。无涨停数据返回 None。
+    """
+    def _rows(func):
+        try:
+            df = _pool_em(func, date_str)
+            return [_stock_from_pool_row(r) for _, r in df.iterrows()]
+        except Exception:
+            return []
+    zt_rows = _rows("stock_zt_pool_em")
+    if not zt_rows:
+        return None
+    dt_rows = _rows("stock_zt_pool_dtgc_em")
+    prev_rows = _rows("stock_zt_pool_previous_em")
+    today_codes = {r.get("code") for r in zt_rows if r.get("code")}
+    # 隔日溢价：昨涨停股当日涨跌幅均值
+    avg_premium = _avg([r.get("changePct") for r in prev_rows])
+    # 连板晋级率：昨连板(>=2) 今日仍涨停
+    prev_2p = [r for r in prev_rows if (to_float(r.get("prevLb")) or 0) >= 2]
+    promote = [r for r in prev_2p if r.get("code") in today_codes]
+    promote_rate = (len(promote) / len(prev_2p)) if prev_2p else None
+    # 首板→2板率：昨首板(==1) 今日仍涨停
+    prev_1 = [r for r in prev_rows if (to_float(r.get("prevLb")) or 0) == 1]
+    first2 = [r for r in prev_1 if r.get("code") in today_codes]
+    first2_rate = (len(first2) / len(prev_1)) if prev_1 else None
+    return {
+        "date": date_str,
+        "avgPremium": round(avg_premium, 2) if avg_premium is not None else None,
+        "promoteRate": round(promote_rate, 3) if promote_rate is not None else None,
+        "first2Rate": round(first2_rate, 3) if first2_rate is not None else None,
+        "zt": len(zt_rows), "dt": len(dt_rows),
+        "up": None, "down": None,  # 东财无历史涨跌家数
+        "amountChgPct": _amount_chg_pct(date_str),
+    }
+
+
+def money_effect_day(date_str):
+    """当日赚钱效应双线指数。优先用涨停池口径（含隔日溢价/晋级率），补当日红绿家数。"""
+    day = _money_day_from_pools(date_str)
+    if not day:
+        return None
+    # 若当日有全市场快照（今天），补涨跌家数
+    try:
+        p = fetch_market_profile(date_str)
+        day["up"] = p.get("up")
+        day["down"] = p.get("down")
+    except Exception:
+        pass
+    rules = money_engine.load_rules(MONEY_RULES_FILE)
+    res = money_engine.compute(day, rules)
+    res["savedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return res
+
+
+def save_money_day(date_str, overwrite=False):
+    """计算并落盘 data/money/<日期>.json。已存在且非 overwrite 则跳过。"""
+    path = os.path.join(MONEY_DIR, date_str + ".json")
+    if os.path.isfile(path) and not overwrite:
+        return False
+    res = money_effect_day(date_str)
+    if not res:
+        return False
+    try:
+        os.makedirs(MONEY_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(res, f, ensure_ascii=False)
+        return True
+    except Exception as exc:
+        print("[money] %s 落盘失败: %r" % (date_str, exc), flush=True)
+        return False
+
+
+def backfill_money(days=20, max_lookback=45):
+    """逐日回填赚钱效应（东财涨停池可用窗口 ~2周）。返回新增天数。"""
+    now = datetime.now()
+    saved = 0
+    for offset in range(0, max_lookback):
+        if saved >= days:
+            break
+        d = (now - timedelta(days=offset))
+        if d.weekday() >= 5:
+            continue
+        ds = d.strftime("%Y-%m-%d")
+        if os.path.isfile(os.path.join(MONEY_DIR, ds + ".json")):
+            saved += 1
+            continue
+        try:
+            if save_money_day(ds):
+                saved += 1
+        except Exception as exc:
+            print("[money] %s 回填失败: %r" % (ds, exc), flush=True)
+    print("[money] 回填完成，覆盖 %d 个交易日" % saved, flush=True)
+    return saved
+
+
+def money_series(days=60):
+    """读 data/money/*.json，按日期升序返回。"""
+    if not os.path.isdir(MONEY_DIR):
+        return []
+    names = sorted(n[:-5] for n in os.listdir(MONEY_DIR) if n.endswith(".json"))
+    rows = []
+    for d in names[-days:]:
+        try:
+            with open(os.path.join(MONEY_DIR, d + ".json"), encoding="utf-8") as f:
+                rows.append(json.load(f))
+        except Exception:
+            continue
+    return rows
+
+
 def compute_prev_premium(prev_rows):
     """昨涨停溢价 = prev 池全部涨跌幅均值；连板溢价 = 昨日连板数>=2 均值。"""
     all_chg = [to_float(s.get("changePct")) for s in prev_rows]
@@ -3477,6 +3617,20 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/tactics/dates":
             self.send_json({"ok": True, "dates": list_tactics_dates()})
+            return
+        if parsed.path == "/api/money/backfill":
+            try:
+                n = backfill_money()
+                self.send_json({"ok": True, "days": n, "rows": money_series(60)})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=502)
+            return
+        if parsed.path == "/api/money":
+            try:
+                days = int((parse_qs(parsed.query).get("days") or ["30"])[0])
+            except (TypeError, ValueError):
+                days = 30
+            self.send_json({"ok": True, "rows": money_series(max(1, min(days, 120)))})
             return
         if parsed.path == "/api/tactics":
             qs = parse_qs(parsed.query)

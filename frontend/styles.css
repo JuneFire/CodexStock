@@ -1956,3 +1956,17 @@ input[type="search"] {
 .fold-summary::-webkit-details-marker { display: none; }
 .fold-summary::before { content: "▸ "; color: var(--text-3); }
 .fold-panel[open] .fold-summary::before { content: "▾ "; }
+
+/* 赚钱效应曲线 */
+.money-chart { padding: 8px 10px 0; }
+.money-svg { width: 100%; height: 300px; display: block; }
+.money-grid { stroke: var(--border); stroke-width: 1; }
+.money-mid { stroke: var(--text-3); stroke-dasharray: 6 4; }
+.money-ylabel { fill: var(--text-3); font-size: 11px; text-anchor: end; }
+.money-xlabel { fill: var(--text-3); font-size: 11px; }
+.money-line { fill: none; stroke-width: 2; }
+.money-line-short { stroke: var(--up); }
+.money-line-market { stroke: var(--accent); }
+.money-hint { padding: 20px; text-align: center; color: var(--text-3); font-size: 13px; }
+.legend-short { color: var(--up); }
+.legend-market { color: var(--accent); }
