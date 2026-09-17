@@ -2949,6 +2949,18 @@ def scan_tactics(date_str):
                 pass
     except Exception as exc:
         print("[tactics] 流通市值快照获取失败: %r" % exc, flush=True)
+    # 板块形态：候选所属新浪行业 → 行业指数（低位站上60线+5/10/20多头向上）
+    # 直接读缓存文件（不触发重建，重建需数十分钟；陈旧数据作为加分信号可接受）
+    sector_map = load_sector_map()
+    name2idx = {}
+    try:
+        with open(SECTOR_INDEX_FILE, encoding="utf-8") as f:
+            for _lbl, _idx in ((json.load(f) or {}).get("indices") or {}).items():
+                nm = _idx.get("name")
+                if nm:
+                    name2idx[nm] = _idx
+    except Exception as exc:
+        print("[tactics] 行业指数读取失败: %r" % exc, flush=True)
     out = []
     for r in cands:
         code = r.get("code")
@@ -2962,12 +2974,17 @@ def scan_tactics(date_str):
             feats["floatCapYi"] = cap_map[code]
         ind = str(r.get("industry") or "").strip()
         s_zt = sector_zt.get(ind, 0)
+        # 板块形态（按新浪行业指数）
+        sec_name = sector_map.get(str(code).zfill(6))
+        sector_form = tactics_engine.judge_sector(name2idx.get(sec_name)) if sec_name else None
         stage, stage_desc = tactics_engine.judge_turnover_stage(feats.get("turnoverSeq") or [], rules)
-        score, hits, warns = tactics_engine.score_candidate(feats, stage, rules, sector_zt_count=s_zt)
+        score, hits, warns = tactics_engine.score_candidate(feats, stage, rules, sector_zt_count=s_zt,
+                                                            sector_form=sector_form)
         reso = tactics_engine.judge_resonance(hits, stage, s_zt, rules)
         out.append({
             "code": code, "name": r.get("name") or "", "industry": r.get("industry") or "",
             "lb": r.get("lb"), "sealAmount": r.get("sealAmount"), "sectorZt": s_zt,
+            "sectorName": sec_name, "sectorForm": sector_form,
             "stage": stage, "stageDesc": stage_desc, "score": score,
             "hits": hits, "warns": warns, "resonance": reso,
             "latestTurnover": feats.get("latestTurnover"),

@@ -153,5 +153,27 @@ class TestResonance(unittest.TestCase):
         self.assertFalse(r["resonant"])
 
 
+class TestSectorForm(unittest.TestCase):
+    def test_none_returns_none(self):
+        self.assertIsNone(tactics_engine.judge_sector(None))
+        self.assertIsNone(tactics_engine.judge_sector({"closes": [1, 2, 3]}))
+
+    def test_good_low_reclaim(self):
+        # 先前高位12 → 下跌到10 → 低位回升站上60线，5/10/20多头
+        closes = [12.0] * 20 + [12.0 - i * 0.025 for i in range(80)] + [10.025 + i * 0.03 for i in range(21)]
+        r = tactics_engine.judge_sector({"name": "测试板块", "closes": closes})
+        self.assertIsNotNone(r)
+        self.assertTrue(r["good"], r)
+        self.assertIn("站上60线", r["hits"])
+        self.assertIn("5-10-20多头", r["hits"])
+
+    def test_far_above_ma60_not_good(self):
+        # 持续大涨远离60线 → 不算"刚站上"
+        closes = [10.0] * 60 + [10.0 + i * 0.3 for i in range(30)]
+        r = tactics_engine.judge_sector({"name": "高位板块", "closes": closes})
+        self.assertIsNotNone(r)
+        self.assertFalse(r["good"])
+
+
 if __name__ == "__main__":
     unittest.main()

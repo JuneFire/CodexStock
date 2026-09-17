@@ -34,6 +34,7 @@ DEFAULT_RULES = {
         "boxFlat": 15, "maConverge": 10, "floatOk": 10, "upside": 10,
         "stageHealthy": 20, "stageLift": 15, "stageBurst": -25,
         "sectorResonance": 15,   # 板块共振（同行业≥2只涨停）
+        "sectorForm": 15,        # 板块形态好（低位站上60线+5/10/20多头向上）
         "volDouble": 15,         # 首板/二板倍量
     },
     "sectorResonanceMin": 2,   # 同行业涨停家数达到此值算板块共振
@@ -160,10 +161,11 @@ def judge_turnover_stage(turnover_seq, rules):
     return "常规", ""
 
 
-def score_candidate(features, stage, rules, sector_zt_count=0):
-    """技术面特征 + 阶段 + 板块涨停家数 → (score, hits[], warns[])。
+def score_candidate(features, stage, rules, sector_zt_count=0, sector_form=None):
+    """技术面特征 + 阶段 + 板块涨停家数 + 板块形态 → (score, hits[], warns[])。
 
-    三方共振：消息面(用板块热度近似) + 板块(同行业涨停家数) + 个股(技术面/换手率)。
+    三方共振：消息面(板块热度近似) + 板块(同行业涨停家数) + 个股(技术面/换手率)。
+    sector_form: judge_sector 的结果；good=True 时加板块形态分。
     """
     w = rules["weights"]
     sc = 0
@@ -189,6 +191,9 @@ def score_candidate(features, stage, rules, sector_zt_count=0):
     # 板块共振（三方之一：消息面/热点催化近似）
     if sector_zt_count >= rules["sectorResonanceMin"]:
         sc += w["sectorResonance"]; hits.append("板块共振%d只" % sector_zt_count)
+    # 板块形态好（三方·板块质量）：低位站上60线 + 5/10/20多头向上
+    if sector_form and sector_form.get("good"):
+        sc += w.get("sectorForm", 0); hits.append("板块形态好")
     # 倍量（首板/二板当日量较前一日 ≥ 倍数）
     pvr = features.get("prevVolRatio")
     if pvr is not None and pvr >= rules["volDoubleMult"]:
@@ -313,3 +318,49 @@ def judge_congestion(feats, rules=None):
     return {"volShrink": round(vol_shrink, 3), "amplitude": round(amplitude, 4),
             "nearMa": round(near_ma, 4) if near_ma is not None else None,
             "red": red, "score": sc, "hits": hits}
+
+
+# ---------- 板块形态（三方共振·板块质量加分） ----------
+
+SECTOR_FORM_RULES = {
+    "weight": 15,            # 板块形态好 → 加分
+    "maNearMax": 0.10,       # close 在 ma60 上方 0~10% = 刚站上
+    "posLookback": 120,      # 低位判定回看天数
+    "posMax": 0.50,          # 在近N日区间的下半区 = 低位
+}
+
+
+def judge_sector(idx, rules=None):
+    """板块指数技术形态：低位站上60线 + 5/10/20多头向上。
+
+    idx: {name, closes, volumes} | None。返回 {good, hits, ...} 或 None。
+    good = 站上60线 且 刚站上(<=maNearMax) 且 MA5>MA10>MA20 且 MA20上行 且 低位
+    """
+    r = rules or SECTOR_FORM_RULES
+    if not idx:
+        return None
+    closes = idx.get("closes") or []
+    if len(closes) < 61:
+        return None
+    close = closes[-1]
+    ma5, ma10, ma20, ma60 = _ma(closes, 5), _ma(closes, 10), _ma(closes, 20), _ma(closes, 60)
+    if None in (ma5, ma10, ma20, ma60) or ma60 <= 0:
+        return None
+    above = close > ma60
+    dist = (close - ma60) / ma60
+    near = 0 <= dist <= r["maNearMax"]          # 刚站上60线（未远离）
+    bull = ma5 > ma10 > ma20                     # 5/10/20 多头排列
+    up = (ma20 > _ma(closes[:-1], 20)) and (ma5 > _ma(closes[:-1], 5))  # 均线上行
+    look = closes[-r["posLookback"]:]
+    rng = max(look) - min(look)
+    pos = (close - min(look)) / rng if rng > 0 else None
+    low = pos is not None and pos < r["posMax"]
+    hits = []
+    if above: hits.append("站上60线")
+    if near: hits.append("刚站上")
+    if bull: hits.append("5-10-20多头")
+    if up: hits.append("均线上行")
+    if low: hits.append("低位%.0f%%" % (pos * 100) if pos is not None else "低位")
+    good = above and near and bull and up and low
+    return {"good": good, "hits": hits, "dist": round(dist, 4),
+            "pos": round(pos, 3) if pos is not None else None, "name": idx.get("name")}
