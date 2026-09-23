@@ -59,6 +59,34 @@
 
         <section class="panel table-panel">
           <div class="table-head">
+            <span class="table-title">情绪历史</span>
+            <span id="sentMeta" class="muted">—</span>
+          </div>
+          <div class="table-responsive">
+            <table class="table" id="sentTable">
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>涨停</th>
+                  <th>跌停</th>
+                  <th>炸板</th>
+                  <th>红/绿</th>
+                  <th>最高板</th>
+                  <th>短线效应</th>
+                  <th>大盘效应</th>
+                  <th>量能(亿)</th>
+                  <th>环境</th>
+                  <th>晋级/被卡位</th>
+                </tr>
+              </thead>
+              <tbody id="sentBody"></tbody>
+            </table>
+          </div>
+          <div id="sentEmpty" class="horse-empty" hidden>暂无情绪历史（每日收盘累积）</div>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="table-head">
             <span id="resultCount" class="muted">—</span>
           </div>
           <div class="table-responsive">

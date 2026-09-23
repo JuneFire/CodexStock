@@ -117,6 +117,7 @@
     const price = Number(s.price) || 0;
     const volume = Number(s.auctionVolume) || 0;
     const yAmount = Number(s.yesterdayAmount) || 0;
+    const yAuction = Number(s.prevAuctionAmount) || 0;
 
     const ratio = yAmount > 0 ? amount / yAmount * 100 : null;
     const strength = floatCap > 0 ? amount / floatCap * 10000 : null;
@@ -126,6 +127,7 @@
     s.ratioToYesterday = round2(ratio);
     s.amountStrength = round2(strength);
     s.auctionTurnover = round2(auctionTurnover);
+    s.auctionVsPrev = yAuction > 0 ? round2(amount / yAuction) : null;
     s.score = scoreOf(s);
     s.tags = tagsOf(s);
     return s;
@@ -138,21 +140,30 @@
       (Number(s.changePct) || 0) >= 3;
   }
 
+  // 今日竞价额 ≥ 昨日竞价额的 2 倍：竞价资金相比昨天明显放大（与"抢筹"是两个独立口径：
+  // 抢筹比的是昨日全天成交额，这里比的是昨日集合竞价成交额）
+  const AUCTION_DOUBLE = 2;
+  function isAuctionDouble(s) {
+    return (Number(s.auctionVsPrev) || 0) >= AUCTION_DOUBLE;
+  }
+
   // 选股原因：仅对特殊股生成文字（昨连板/抢筹/高分领涨），普通强势股返回空
   function reasonOf(s) {
     const prevLb = Number(s.prevLb) || 0;
     const grab = isGrab(s);
+    const dbl = isAuctionDouble(s);
     const score = Number(s.score) || 0;
-    // 普通强势股（放量/高开但非连板非抢筹非高分）不显示，避免与状态列重复
-    if (prevLb === 0 && !grab && score < 85) return '';
+    // 普通强势股（放量/高开但非连板非抢筹非翻倍非高分）不显示，避免与状态列重复
+    if (prevLb === 0 && !grab && !dbl && score < 85) return '';
 
     if (prevLb >= 2) {
       const isTop = (state.stocks[0] || {}).code === s.code;
-      return isTop ? '昨' + prevLb + '连板领涨，追高需谨慎' : '昨' + prevLb + '连板';
+      return (isTop ? '昨' + prevLb + '连板领涨，追高需谨慎' : '昨' + prevLb + '连板') + (dbl ? '·竞价翻倍' : '');
     }
-    if (prevLb === 1) return '昨涨停';
+    if (prevLb === 1) return '昨涨停' + (dbl ? '·竞价翻倍' : '');
     const parts = [];
     if (grab) parts.push('抢筹');
+    if (dbl) parts.push('竞价翻倍');
     if ((Number(s.ratioToYesterday) || 0) >= 20) parts.push('大幅放量');
     if ((Number(s.amountStrength) || 0) >= 30) parts.push('高金额强度');
     return parts.join('+') || '高分';
@@ -510,7 +521,10 @@
       const watched = state.watchlist.includes(s.code);
       const selected = s.code === state.selectedCode;
       const grab = isGrab(s);
+      const dbl = isAuctionDouble(s);
       const tags = (s.tags || []).slice(0, 2);
+      const prevAmt = s.prevAuctionAmount == null ? '—'
+        : `<span class="amount-dim">${fmtAmountYuan(s.prevAuctionAmount)}</span><em class="mul ${(s.auctionVsPrev || 0) >= 1 ? 'up' : 'down'}">×${fmtNum(s.auctionVsPrev, 2)}</em>`;
       return `
         <tr class="${selected ? 'is-selected' : ''}${grab ? ' is-grab' : ''}" data-code="${esc(s.code)}">
           <td>
@@ -520,7 +534,7 @@
           </td>
           <td class="stock-code">${esc(s.code)}</td>
           <td>
-            <span class="stock-name">${esc(s.name)}${grab ? '<span class="grab-badge" title="竞价抢筹">抢筹</span>' : ''}</span>
+            <span class="stock-name">${esc(s.name)}${grab ? '<span class="grab-badge" title="竞价抢筹">抢筹</span>' : ''}${dbl ? `<span class="grab-badge dbl-badge" title="今日竞价额 ≥ 昨日竞价额 ${AUCTION_DOUBLE} 倍">竞价翻倍</span>` : ''}</span>
             <span class="stock-sector">${esc(s.industry)}</span>
           </td>
           <td class="num col-prevlb ${s.prevLb >= 2 ? 'lb-high' : s.prevLb === 1 ? 'lb-one' : ''}">${s.prevLb >= 1 ? (s.prevLb + '板') : '—'}</td>
@@ -529,6 +543,7 @@
           <td class="num col-realtime ${rtCls(state.realtime[s.code])}">${state.realtime[s.code] != null ? fmtPct(state.realtime[s.code]) : '—'}</td>
           <td class="num col-amount amount-strong">${fmtAmountYuan(s.auctionAmount)}</td>
           <td class="num col-yamount amount-dim">${fmtAmountYuan(s.yesterdayAmount)}</td>
+          <td class="num col-prevAmount">${prevAmt}</td>
           <td class="num col-ratio ${colorCls((s.ratioToYesterday || 0) - 10)}">${fmtNum(s.ratioToYesterday, 1)}%</td>
           <td class="num col-strength ${levelCls(s.amountStrength, 100, 30)}">${fmtNum(s.amountStrength, 1)}</td>
           <td class="num col-auctionTurnover ${levelCls(s.auctionTurnover, 1.5, 0.8)}">${fmtNum(s.auctionTurnover, 2)}%</td>
@@ -576,6 +591,8 @@
     const metrics = [
       ['竞价金额', fmtAmountYuan(s.auctionAmount)],
       ['昨日成交额', fmtAmountYuan(s.yesterdayAmount)],
+      ['昨日竞价额', s.prevAuctionAmount == null ? '—'
+        : fmtAmountYuan(s.prevAuctionAmount) + (s.auctionVsPrev == null ? '' : '　今日 ×' + fmtNum(s.auctionVsPrev, 2))],
       ['竞价占昨日', fmtNum(s.ratioToYesterday, 1) + '%'],
       ['金额强度', fmtNum(s.amountStrength, 1) + ' bp'],
       ['竞价换手', fmtNum(s.auctionTurnover, 2) + '%']
@@ -681,6 +698,7 @@
       yesterdayAmount: s.yesterdayAmount == null ? null : Number(s.yesterdayAmount),
       yesterdayTurnover: s.yesterdayTurnover == null ? null : Number(s.yesterdayTurnover),
       yesterdayClose: s.yesterdayClose == null ? null : Number(s.yesterdayClose),
+      prevAuctionAmount: s.prevAuctionAmount == null ? null : Number(s.prevAuctionAmount),
       prevLb: s.prevLb == null ? 0 : Number(s.prevLb),
       fetchedAt: s.fetchedAt || ''
     });
@@ -815,7 +833,7 @@
   }
 
   // ---------- CSV 导入导出 ----------
-  const CSV_HEADERS = ['代码', '名称', '板块', '竞价价', '竞价涨幅', '竞价金额(元)', '竞价量(手)', '竞价换手(%)', '流通市值(元)', '昨日成交额(元)', '昨日占比(%)', '金额强度(bp)', '超预期分', '状态'];
+  const CSV_HEADERS = ['代码', '名称', '板块', '竞价价', '竞价涨幅', '竞价金额(元)', '竞价量(手)', '竞价换手(%)', '流通市值(元)', '昨日成交额(元)', '昨日竞价额(元)', '昨日占比(%)', '金额强度(bp)', '超预期分', '状态'];
 
   function normalizeKey(s) {
     return String(s).toLowerCase().replace(/[\s（）()%％]/g, '');
@@ -833,6 +851,7 @@
     volumeRatio: ['量比', 'volumeRatio'],
     floatCap: ['流通市值', 'floatCap'],
     yesterdayAmount: ['昨日成交额', 'yesterdayAmount'],
+    prevAuctionAmount: ['昨日竞价额', '昨日竞价额元', 'prevAuctionAmount'],
     ratioToYesterday: ['昨日占比', '竞价占比', '竞价占昨日', 'ratioToYesterday'],
     amountStrength: ['金额强度', 'amountStrength'],
     yesterdayTurnover: ['昨换手', '昨日换手率', 'yesterdayTurnover']
@@ -911,6 +930,7 @@
       const ratio = parseNum(get('ratioToYesterday'), 'plain');
       const strength = parseNum(get('amountStrength'), 'plain');
       const yesterdayTurnover = parseNum(get('yesterdayTurnover'), 'plain');
+      const prevAuctionAmount = parseNum(get('prevAuctionAmount'), 'yuan');
       const name = String(get('name') || code).trim();
       const industry = String(get('industry') || '其他').trim();
       const prevClose = price && changePct != null ? round(price / (1 + changePct / 100), 2) : null;
@@ -922,7 +942,7 @@
         turnover, volumeRatio,
         floatCap: floatCap || 0,
         totalCap: floatCap || 0,
-        yesterdayAmount, yesterdayTurnover,
+        yesterdayAmount, yesterdayTurnover, prevAuctionAmount,
         yesterdayClose: prevClose,
         ratioToYesterday: ratio,
         amountStrength: strength
@@ -956,7 +976,8 @@
     const row = [
       sample.code, sample.name, sample.industry, sample.price, sample.changePct,
       sample.auctionAmount, sample.auctionVolume, sample.auctionTurnover,
-      sample.floatCap, sample.yesterdayAmount, sample.ratioToYesterday, sample.amountStrength,
+      sample.floatCap, sample.yesterdayAmount, (sample.prevAuctionAmount == null ? '' : sample.prevAuctionAmount),
+      sample.ratioToYesterday, sample.amountStrength,
       sample.score, (sample.tags || []).join('|')
     ].join(',');
     downloadCSV('量化选股器模板.csv', CSV_HEADERS.join(',') + '\n' + row);
@@ -991,7 +1012,8 @@
     const lines = rows.map(s => [
       s.code, s.name, s.industry, s.price, s.changePct,
       s.auctionAmount, s.auctionVolume, s.auctionTurnover,
-      s.floatCap, s.yesterdayAmount, s.ratioToYesterday, s.amountStrength,
+      s.floatCap, s.yesterdayAmount, (s.prevAuctionAmount == null ? '' : s.prevAuctionAmount),
+      s.ratioToYesterday, s.amountStrength,
       s.score, (s.tags || []).join('|')
     ].join(','));
     const stamp = new Date().toISOString().slice(0, 10);

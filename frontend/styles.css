@@ -643,6 +643,11 @@ input[type="search"] {
   vertical-align: 1px;
 }
 
+/* 竞价额较昨日翻倍（与"抢筹"不同口径，用紫色区分） */
+.dbl-badge {
+  background: #7c3aed;
+}
+
 .stock-sector {
   display: block;
   font-size: 11px;
@@ -673,6 +678,13 @@ input[type="search"] {
 
 .amount-dim {
   color: var(--text-3);
+}
+
+/* 竞价额放大倍数（今日竞价额 / 昨日竞价额），颜色沿用 .up/.down */
+.mul {
+  font-style: normal;
+  margin-left: 4px;
+  font-size: 11px;
 }
 
 .tag {
@@ -1280,6 +1292,7 @@ input[type="search"] {
 /* ---------- Responsive columns ---------- */
 @media (max-width: 1380px) {
   .col-yamount,
+  .col-prevAmount,
   .col-vol {
     display: none;
   }
@@ -1967,6 +1980,13 @@ input[type="search"] {
 .money-line { fill: none; stroke-width: 2; }
 .money-line-short { stroke: var(--up); }
 .money-line-market { stroke: var(--accent); }
+.money-line-lose { stroke: var(--down); }
 .money-hint { padding: 20px; text-align: center; color: var(--text-3); font-size: 13px; }
 .legend-short { color: var(--up); }
 .legend-market { color: var(--accent); }
+.legend-lose { color: var(--down); }
+/* 提示面板里的次新(N/C)名单 */
+.money-newstocks { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 12px 4px; font-size: 12px; }
+.money-newstocks-title { color: var(--text-3); }
+a.money-newstock { text-decoration: none; }
+a.money-newstock em { font-style: normal; margin-left: 4px; }

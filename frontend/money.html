@@ -36,12 +36,13 @@
     </header>
 
     <main class="main env-main">
+      <div id="moneyAlert" hidden></div>
       <div id="moneyBanner" class="env-banner" hidden></div>
 
       <section class="panel env-panel">
         <div class="panel-head">
           <h2>赚钱效应曲线</h2>
-          <span class="panel-meta"><span class="legend-short">■</span> 短线打板效应　<span class="legend-market">■</span> 大盘赚钱效应　虚线=50中轴</span>
+          <span class="panel-meta"><span class="legend-short">■</span> 短线打板效应　<span class="legend-market">■</span> 大盘赚钱效应　<span class="legend-lose">■</span> 亏钱效应　虚线=50中轴</span>
         </div>
         <div id="moneyChart" class="money-chart"></div>
         <div id="moneyHint" class="money-hint">—</div>
@@ -53,7 +54,7 @@
           <table class="table" id="moneyTable">
             <thead>
               <tr>
-                <th>日期</th><th>短线效应</th><th>大盘效应</th>
+                <th>日期</th><th>短线效应</th><th>大盘效应</th><th>亏钱效应</th>
                 <th>隔日溢价</th><th>连板晋级率</th><th>首板→2板</th>
                 <th>涨跌停比</th><th>涨跌家数</th><th>量能较昨</th>
               </tr>

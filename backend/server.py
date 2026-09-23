@@ -68,6 +68,7 @@ TRACK_DAYS = 7  # 跟踪保留交易日数
 MONEY_DIR = os.path.join(DATA_DIR, "money")  # 赚钱效应双线每日指数
 MONEY_RULES_FILE = os.path.join(DATA_DIR, "money_rules.json")  # 赚钱效应阈值（用户可改）
 LEADERSHIP_DIR = os.path.join(DATA_DIR, "leadership")  # 卡位晋级检测
+NEWSTOCKS_DIR = os.path.join(DATA_DIR, "newstocks")  # 上市首日/次新(N/C)当日快照
 CONGESTION_DIR = os.path.join(DATA_DIR, "congestion")  # 量窒息检测
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -77,6 +78,13 @@ PUSH2_URL = (
     "pn=1&pz=300&po=1&np=1&fltt=2&invt=2&fid=f6"
     "&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
     "&fields=f2,f3,f5,f6,f8,f10,f12,f14,f20,f21,f100"
+    "&ut=bd1d9ddb04089700cf9c27f6f7426281"
+)
+NEWSTOCKS_URL = (
+    "https://push2.eastmoney.com/api/qt/clist/get?"
+    "pn=1&pz=200&po=1&np=1&fltt=2&invt=2&fid=f26"
+    "&fs=m:0+f:8,m:1+f:8"
+    "&fields=f2,f3,f6,f7,f8,f10,f12,f14"
     "&ut=bd1d9ddb04089700cf9c27f6f7426281"
 )
 KLINE_URL = (
@@ -748,6 +756,26 @@ def _in_auction_window(now):
     return AUTO_FETCH_WINDOW[0] <= hm < AUTO_FETCH_WINDOW[1]
 
 
+def load_prev_auction_map(date_str):
+    """上一交易日快照的 {代码: 竞价额}，用于算"昨日竞价额"与放大倍数。
+
+    集合竞价成交额不在日K里（日K是全天成交额），只能从自己落盘的快照归档取。
+    只覆盖前一日快照 Top-N 内的个股，取不到的返回缺省（前端显示 —）。
+    """
+    prev = _prev_data_date(HISTORY_DIR, date_str)
+    if not prev:
+        return {}
+    day = _history_json_day(prev)
+    if not day:
+        return {}
+    out = {}
+    for s in day.get("stocks") or []:
+        code, amt = s.get("code"), s.get("auctionAmount")
+        if code and amt:
+            out[code] = amt
+    return out
+
+
 def build_snapshot(auto=False):
     if not _fetch_lock.acquire(blocking=False):
         raise RuntimeError("已有抓取任务进行中，请稍后再试")
@@ -809,6 +837,17 @@ def _build_snapshot(auto=False):
     prev_lb = load_prev_lb_map()
     for s in stocks:
         s["prevLb"] = prev_lb.get(s.get("code"), 0)
+    # 昨日竞价额：取自上一交易日快照归档（日K只有全天成交额，没有集合竞价成交额）
+    prev_auction = load_prev_auction_map(snapshot_date)
+    matched = 0
+    for s in stocks:
+        pa = prev_auction.get(s.get("code"))
+        amt = s.get("auctionAmount")
+        s["prevAuctionAmount"] = pa
+        s["auctionVsPrev"] = round(amt / pa, 2) if (pa and amt) else None
+        if pa:
+            matched += 1
+    print("[fetch] 昨日竞价额匹配 %d/%d" % (matched, len(stocks)), flush=True)
     stocks.sort(key=lambda s: (s.get("score") or 0), reverse=True)
     for idx, stock in enumerate(stocks, start=1):
         stock["rank"] = idx
@@ -1686,7 +1725,8 @@ def _run_close_review():
         _run_preselect_node(date)  # 节点预选票：冰点/退潮日筛候选，并入 sentiment JSON
         scan_tactics(date)  # 二板战法扫描：涨停首板/2板的技术面+换手率阶段
         update_tracking(date)  # 二板战法跨日跟踪池（保留7个交易日）
-        save_money_day(date, overwrite=True)  # 赚钱效应双线指数
+        save_money_day(date, overwrite=True)  # 赚钱效应三线指数（含亏钱效应）
+        save_newstocks(date)  # 当日 N/C 名单快照（前缀次日漂移，必须当天存）
         scan_leadership(date)  # 卡位晋级检测
         scan_congestion(date)  # 量窒息（缩量横盘）检测
         print("[close] 当日复盘已自动生成并入库: %s" % date, flush=True)
@@ -2077,7 +2117,7 @@ def _pool_em_like(func_name):
     return df
 
 
-def save_sentiment_json(date_str):
+def save_sentiment_json(date_str, live_activity=True):
     """收盘后落盘当日情绪摘要到 data/sentiment/<日期>.json。
 
     字段对齐"市场涨跌监控表"口径：
@@ -2089,6 +2129,8 @@ def save_sentiment_json(date_str):
       lb_total/lb2/lb3/lb3p  连板总数 / 二连板 / 三连板 / 三板以上
       maxTier         最高连板
     涨停/连板数据复用已落盘的 ztpool；红绿/真实涨停来自 stock_market_activity_legu。
+    live_activity=False 用于回填历史日：该接口只有实时快照，取不到过去某天的红绿，
+    留着空也不要把当日值写进历史文件。
     失败不抛，只打日志。
     """
     rows = _ztpool_rows(date_str)
@@ -2110,20 +2152,21 @@ def save_sentiment_json(date_str):
         zb_count = len(df)
     except Exception:
         pass
-    # 红绿/真实涨停：东财活跃度（收盘后给当日数据）
+    # 红绿/真实涨停：东财活跃度（收盘后给当日数据，且只有实时快照）
     red = green = zt_real = None
-    try:
-        act = _fetch_market_activity()
-        def _num_of(item):
-            try:
-                return int(float(act.get(item) or 0))
-            except (TypeError, ValueError):
-                return None
-        red = _num_of("上涨")
-        green = _num_of("下跌")
-        zt_real = _num_of("真实涨停")
-    except Exception:
-        pass
+    if live_activity:
+        try:
+            act = _fetch_market_activity()
+            def _num_of(item):
+                try:
+                    return int(float(act.get(item) or 0))
+                except (TypeError, ValueError):
+                    return None
+            red = _num_of("上涨")
+            green = _num_of("下跌")
+            zt_real = _num_of("真实涨停")
+        except Exception:
+            pass
     # 板块强度：涨停池按行业聚合（涨停家数降序），含最大封单个股
     sector_stat = {}
     for r in rows:
@@ -2182,6 +2225,35 @@ def save_sentiment_json(date_str):
     except Exception as exc:
         print("[sentiment] %s 落盘失败: %r" % (date_str, exc), flush=True)
         return False
+
+
+def backfill_sentiment(days=20, max_lookback=45):
+    """逐日回填情绪摘要（东财涨停池可用窗口 ~2周）。返回覆盖天数。
+
+    涨停/跌停/炸板/连板来自东财历史池，可按日期回溯；红绿家数源为实时快照，
+    历史日取不到，落盘时留空（见 save_sentiment_json 的 live_activity）。
+    """
+    now = datetime.now()
+    saved = 0
+    for offset in range(0, max_lookback):
+        if saved >= days:
+            break
+        d = now - timedelta(days=offset)
+        if d.weekday() >= 5:
+            continue
+        ds = d.strftime("%Y-%m-%d")
+        if os.path.isfile(os.path.join(SENTIMENT_DIR, ds + ".json")):
+            saved += 1
+            continue
+        try:
+            if not save_ztpool_json(ds):
+                continue
+            if save_sentiment_json(ds, live_activity=False):
+                saved += 1
+        except Exception as exc:
+            print("[sentiment] %s 回填失败: %r" % (ds, exc), flush=True)
+    print("[sentiment] 回填完成，覆盖 %d 个交易日" % saved, flush=True)
+    return saved
 
 
 def load_sentiment_history(limit=10):
@@ -3297,7 +3369,7 @@ def _money_day_from_pools(date_str):
 
 
 def money_effect_day(date_str):
-    """当日赚钱效应双线指数。优先用涨停池口径（含隔日溢价/晋级率），补当日红绿家数。"""
+    """当日赚钱效应三线指数（短线/大盘/亏钱）。优先用涨停池口径（含隔日溢价/晋级率），补红绿与炸板。"""
     day = _money_day_from_pools(date_str)
     if not day:
         return None
@@ -3313,6 +3385,10 @@ def money_effect_day(date_str):
             day["down"] = p.get("down")
         except Exception:
             pass
+    # 炸板数：涨停池口径不含，取当日情绪摘要（收盘流程里 sentiment 先于 money 落盘）
+    sent = _load_day_sentiment(date_str) or {}
+    if sent.get("zb") is not None:
+        day["zb"] = sent.get("zb")
     rules = money_engine.load_rules(MONEY_RULES_FILE)
     res = money_engine.compute(day, rules)
     res["savedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3372,6 +3448,158 @@ def money_series(days=60):
                 rows.append(json.load(f))
         except Exception:
             continue
+    return rows
+
+
+def money_feed(days=60):
+    """赚钱效应日序列 + 提示列表，供 /api/money。
+
+    历史日的 money 文件落盘时还没有亏钱效应字段，且东财涨停池只有约两周窗口
+    （补不回来），故在读取时用同口径现算：raw + 当日 sentiment 的 zb。
+    已存 lose 的行不重算，与 short/market 一律以落盘值为准的既有行为保持一致。
+    """
+    rules = money_engine.load_rules(MONEY_RULES_FILE)
+    rows = money_series(days)
+    for row in rows:
+        if row.get("lose") is not None:
+            continue
+        raw = row.get("raw") or {}
+        zb = raw.get("zb")
+        if zb is None:
+            zb = (_load_day_sentiment(row.get("date") or "") or {}).get("zb")
+        lose, parts, _ = money_engine.score_lose(raw, zb, rules)
+        row["lose"] = lose
+        row["loseParts"] = parts
+    return rows, money_engine.detect_alerts(rows, rules)
+
+
+def _load_money_day(date_str):
+    path = os.path.join(MONEY_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def fetch_new_stocks():
+    """上市首日(N)/次新(C=第2-5日) 名单。东财新股板块，仅实时可得。失败返回 []。
+
+    直接用 clist 接口而非 akshare：akshare 走的是 40.push2 主机，本机代理会拦，
+    而 app 既有的 push2.eastmoney.com 直连通道一直可用。
+    前缀是交易所标记，会随时间漂移（首日 N → 第2-5日 C → 第5日后消失），
+    所以只在收盘落盘或显式实时查询时调用，不用于回看历史。
+    """
+    try:
+        data = http_json(NEWSTOCKS_URL)
+    except Exception as exc:
+        print("[newstocks] 抓取失败: %r" % (exc,), flush=True)
+        return []
+    diff = ((data or {}).get("data") or {}).get("diff") or []
+    out = []
+    for r in diff:
+        code = str(r.get("f12") or "").strip()
+        name = str(r.get("f14") or "").strip()
+        # 前缀 N/C 为主判据，6 位数字代码兜底防误判
+        if not name or name[:1].upper() not in ("N", "C"):
+            continue
+        if not (len(code) == 6 and code.isdigit()):
+            continue
+        out.append({
+            "code": code,
+            "name": name,
+            "stage": "首日" if name[:1].upper() == "N" else "次新",
+            "price": to_float(r.get("f2")),
+            "chg": to_float(r.get("f3")),
+            "amount": to_float(r.get("f6")),
+            "amplitude": to_float(r.get("f7")),
+            "turnover": to_float(r.get("f8")),
+            "volumeRatio": to_float(r.get("f10")),
+        })
+    out.sort(key=lambda s: -(s.get("chg") or 0))
+    return out
+
+
+def save_newstocks(date_str):
+    """收盘时把当日 N/C 名单快照落盘到 data/newstocks/<日期>.json。
+
+    必须收盘落盘：前缀次日就会漂移（N 变 C、C 第5日后消失），
+    而可操作时点是次日早盘，届时现抓拿到的是另一批股票。
+    """
+    rows = fetch_new_stocks()
+    try:
+        os.makedirs(NEWSTOCKS_DIR, exist_ok=True)
+        with open(os.path.join(NEWSTOCKS_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
+            json.dump({"date": date_str, "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                       "rows": rows}, f, ensure_ascii=False)
+        print("[newstocks] %s N/C 名单已落盘: %d 只" % (date_str, len(rows)), flush=True)
+        return True
+    except Exception as exc:
+        print("[newstocks] %s 落盘失败: %r" % (date_str, exc), flush=True)
+        return False
+
+
+def load_newstocks(date_str):
+    """读某日 N/C 名单快照。无快照返回 None（历史日无法重建）。"""
+    path = os.path.join(NEWSTOCKS_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _dir_dates(dirpath):
+    if not os.path.isdir(dirpath):
+        return set()
+    try:
+        return {n[:-5] for n in os.listdir(dirpath) if n.endswith(".json") and n[:-5] != "track"}
+    except OSError:
+        return set()
+
+
+def _pick(*vals):
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
+def sentiment_history(days=30):
+    """情绪历史：按日合并 情绪摘要(sentiment) + 赚钱效应(money) + 环境(env) + 梯队(leadership)。
+
+    情绪摘要只在盘后复盘落盘，缺该日文件时涨停/跌停回退到赚钱效应的 raw 计数
+    （同为收盘口径，缺失时补位；炸板/红绿/最高板无同源替代，仍留空）。
+    """
+    dates = (_dir_dates(SENTIMENT_DIR) | _dir_dates(MONEY_DIR)
+             | _dir_dates(ENV_DIR) | _dir_dates(LEADERSHIP_DIR))
+    rows = []
+    for d in sorted(dates)[-days:]:
+        sent = _load_day_sentiment(d) or {}
+        money = _load_money_day(d) or {}
+        raw = money.get("raw") or {}
+        env = load_env(d) or {}
+        lead = load_leadership(d) or {}
+        promos = lead.get("promotions") or []
+        rows.append({
+            "date": d,
+            "zt": _pick(sent.get("zt"), raw.get("zt")),
+            "dt": _pick(sent.get("dt"), raw.get("dt")),
+            "zb": sent.get("zb"),
+            "red": sent.get("red"), "green": sent.get("green"),
+            "maxTier": sent.get("maxTier"),
+            "shortEffect": money.get("short"), "marketEffect": money.get("market"),
+            "amountYi": sent.get("marketAmountYi"),
+            "envState": (env.get("conclusion") or {}).get("state"),
+            "envTone": (env.get("conclusion") or {}).get("tone"),
+            "promoteN": len(promos) if lead else None,
+            "kakweiN": sum(1 for p in promos if p.get("type") == "卡位晋级") if lead else None,
+            "lostN": len(lead.get("lostSlots") or []) if lead else None,
+        })
     return rows
 
 
@@ -3741,16 +3969,48 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/money/backfill":
             try:
                 n = backfill_money()
-                self.send_json({"ok": True, "days": n, "rows": money_series(60)})
+                rows, alerts = money_feed(60)
+                self.send_json({"ok": True, "days": n, "rows": rows, "alerts": alerts})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, status=502)
+            return
+        if parsed.path == "/api/sentiment/backfill":
+            try:
+                n = backfill_sentiment()
+                self.send_json({"ok": True, "days": n, "rows": sentiment_history(30)})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=502)
+            return
+        if parsed.path == "/api/sentiment/history":
+            try:
+                days = int((parse_qs(parsed.query).get("days") or ["30"])[0])
+            except (TypeError, ValueError):
+                days = 30
+            self.send_json({"ok": True, "rows": sentiment_history(max(1, min(days, 120)))})
             return
         if parsed.path == "/api/money":
             try:
                 days = int((parse_qs(parsed.query).get("days") or ["30"])[0])
             except (TypeError, ValueError):
                 days = 30
-            self.send_json({"ok": True, "rows": money_series(max(1, min(days, 120)))})
+            rows, alerts = money_feed(max(1, min(days, 120)))
+            self.send_json({"ok": True, "rows": rows, "alerts": alerts})
+            return
+        if parsed.path == "/api/newstocks":
+            qs = parse_qs(parsed.query)
+            date = (qs.get("date") or [""])[0]
+            if date:
+                day = load_newstocks(date)
+                if day is None:
+                    # 历史日无快照：前缀已漂移，无法重建
+                    self.send_json({"ok": True, "date": date, "rows": [], "stale": True})
+                    return
+                self.send_json({"ok": True, "date": date, "rows": day.get("rows") or []})
+                return
+            try:
+                self.send_json({"ok": True, "rows": fetch_new_stocks(), "live": True})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=502)
             return
         if parsed.path == "/api/tactics":
             qs = parse_qs(parsed.query)

@@ -11,6 +11,9 @@
     dateList: $('#dateList'),
     dayStats: $('#dayStats'),
     resultCount: $('#resultCount'),
+    sentMeta: $('#sentMeta'),
+    sentBody: $('#sentBody'),
+    sentEmpty: $('#sentEmpty'),
     stockBody: $('#stockBody'),
     emptyState: $('#emptyState'),
     detailPanel: $('#detailPanel'),
@@ -365,9 +368,53 @@
     });
   }
 
+  // 环境态配色复用环境页的 tone 类（见 styles.css .env-pos/.env-warn/.env-neg/.env-ice）
+  const ENV_TONE_CLS = { pos: 'env-pos', warn: 'env-warn', neg: 'env-neg', ice: 'env-ice' };
+
+  async function loadSentiment() {
+    try {
+      const r = await fetch('/api/sentiment/history?days=30');
+      const d = await r.json();
+      renderSentiment((d && d.rows) || []);
+    } catch (e) {
+      renderSentiment([]);
+    }
+  }
+
+  function renderSentiment(rows) {
+    els.sentMeta.textContent = rows.length ? (rows.length + ' 个交易日') : '—';
+    els.sentEmpty.hidden = rows.length > 0;
+    const n = (v) => (v == null ? '—' : v);
+    els.sentBody.innerHTML = rows.slice().reverse().map(r => {
+      const envCls = ENV_TONE_CLS[r.envTone] || '';
+      let promo = '—';
+      if (r.promoteN != null) {
+        promo = r.promoteN + '晋级';
+        if (r.kakweiN) promo += '/' + r.kakweiN + '卡位';
+        if (r.lostN) promo += '·' + r.lostN + '被卡';
+      }
+      return `
+        <tr>
+          <td class="num">${esc(r.date)}</td>
+          <td class="num">${n(r.zt)}</td>
+          <td class="num">${n(r.dt)}</td>
+          <td class="num">${n(r.zb)}</td>
+          <td class="num">${(r.red == null || r.green == null) ? '—' : (r.red + '/' + r.green)}</td>
+          <td class="num">${r.maxTier == null ? '—' : r.maxTier + '板'}</td>
+          <td class="num ${(r.shortEffect || 0) >= 50 ? 'up' : 'down'}">${n(r.shortEffect)}</td>
+          <td class="num ${(r.marketEffect || 0) >= 50 ? 'up' : 'down'}">${n(r.marketEffect)}</td>
+          <td class="num">${r.amountYi == null ? '—' : Math.round(r.amountYi)}</td>
+          <td>${r.envState ? `<span class="tag ${envCls}">${esc(r.envState)}</span>` : '—'}</td>
+          <td>${promo}</td>
+        </tr>`;
+    }).join('');
+    refreshIcons();
+  }
+
   function init() {
     bindEvents();
     loadDates(1);
+    loadSentiment();
     refreshIcons();
   }
 
