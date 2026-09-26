@@ -3,11 +3,7 @@
 
   const $ = (sel, root) => (root || document).querySelector(sel);
 
-  function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    })[ch]);
-  }
+  const esc = RichText.esc;
 
   let toastTimer = null;
   function toast(msg) {
@@ -83,52 +79,7 @@
     const d = state.data;
     els.planDate.textContent = d.date;
     els.planStatus.textContent = d.date + ' 早盘预案';
-    const lines = (d.text || '').split('\n');
-    // 保留空行，逐行转义（不折叠换行，保持手写格式）
-    els.planContent.innerHTML = lines.map(line => {
-      if (!line.trim()) return '<div class="plan-blank"></div>';
-      // 一级标题（早盘预案）
-      if (/^\d{4}年.*早盘预案$/.test(line.trim())) {
-        return '<h1 class="plan-title">' + esc(line.trim()) + '</h1>';
-      }
-      // 二级标题（大局观/具体机会解析/总结）
-      const section = line.trim();
-      if (section === '大局观' || section === '具体机会解析' || section === '总结') {
-        return '<h2 class="plan-section">' + esc(section) + '</h2>';
-      }
-      // 三级标题（短线方面/题材方面/其他对流/指数/情绪/题材/消息/短线/机器人等）
-      if (/^(短线方面|题材方面|其他对流)$/.test(section)) {
-        return '<h3 class="plan-sub">' + esc(section) + '</h3>';
-      }
-      return '<div class="plan-line">' + highlight(line) + '</div>';
-    }).join('');
-  }
-
-  // 对一行预案文本做关键信息高亮：股票名/连板数/大盘点位/涨跌/关键位
-  // 用控制字符 token 占位，避免多遍正则互相覆盖，最后统一还原为 span
-  function highlight(text) {
-    const safe = esc(text);
-    const tokens = [];
-    const S = '', E = '';
-    function push(type, cls, content) {
-      tokens.push('<span class="' + cls + '">' + content + '</span>');
-      return S + (tokens.length - 1) + E;
-    }
-    let work = safe;
-    // 1. 连板数 N板/N连板（高亮晋级），如 "6板"、"11板"
-    work = work.replace(/(\d+)板/g, (m, n) => push('lb', 'pl-lb', n + '板'));
-    // 2. 大盘点位：独立的 4 位数字（3934/3927/3943/3902），用于指数与关键位
-    work = work.replace(/(?<!\d)(\d{4})(?!\d)/g, (m, n) => push('pt', 'pl-pt', n));
-    // 3. 涨跌幅：带 +/- 或 % 的数字（-0.82%、+0.34%、11%）
-    work = work.replace(/([+-]\d+(?:\.\d+)?%)/g, (m, n) => push('pct', n.startsWith('-') ? 'pl-down' : 'pl-up', n));
-    work = work.replace(/(?<![A-Za-z])(\d+(?:\.\d+)?%)/g, (m, n) => push('pct2', 'pl-pct', n));
-    // 4. 价格/关键位：带小数的数字（157.93、26.83、7.82），用于支撑/低吸位
-    work = work.replace(/(?<!\d)(\d+\.\d{1,2})(?!\d)/g, (m, n) => push('key', 'pl-key', n));
-    // 5. 股票名：常见后缀组合，如 百花医药/秦安股份/哈药股份
-    work = work.replace(/([一-龥]{2,8}?(?:股份|医药|药业|科技|实业|食品|发展|集团|新材|电子|生物|能源|银行|证券|传媒|地产|文化|航空|重机|智能|环保|通信|电气|数据|软件|光电|材料|体育|传媒))/g,
-      (m, name) => push('name', 'pl-name', name));
-    // 还原 token
-    return work.replace(new RegExp(S + '(\\d+)' + E, 'g'), (m, i) => tokens[+i]);
+    RichText.renderInto(d.text, els.planContent);
   }
 
   async function load(date) {

@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .venv/
 config.json
+
+# 悟道厂商 skill：仅本地使用，不随仓库分发（上游更新时从 stock.quicktiny.cn 重拉）
+.claude/skills/wudao-*/

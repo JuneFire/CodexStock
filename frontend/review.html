@@ -6,6 +6,7 @@
   <title>情绪周期复盘 · 量化选股器</title>
   <link rel="stylesheet" href="styles.css">
   <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="rich_text.js"></script>
   <script defer src="review.js"></script>
 </head>
 <body>
@@ -80,6 +81,14 @@
       </aside>
 
       <main class="main review-main">
+
+        <!-- 0. 四层复盘（置顶） -->
+        <section class="panel review-section">
+          <div class="panel-head"><h2>四层复盘</h2><span id="reviewTextMeta" class="panel-meta">—</span></div>
+          <div class="plan-content review-text-body" id="reviewTextBody">
+            <div class="plan-empty">加载中…</div>
+          </div>
+        </section>
 
         <!-- 1. 指数复盘区 -->
         <section class="panel review-section">

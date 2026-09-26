@@ -74,6 +74,8 @@
     preselectMeta: $('#preselectMeta'),
     preselectBody: $('#preselectBody'),
     preselectEmpty: $('#preselectEmpty'),
+    reviewTextMeta: $('#reviewTextMeta'),
+    reviewTextBody: $('#reviewTextBody'),
     fetchProgress: $('#fetchProgress'),
     fetchProgressBar: $('#fetchProgressBar'),
     fetchProgressText: $('#fetchProgressText'),
@@ -279,7 +281,26 @@
     const d = state.data;
     els.reviewStatus.textContent = d.cached ? '已缓存 · ' + (d.fetchedAt || '') : (d.fetchedAt ? '抓取于 ' + (d.fetchedAt || '') : '未抓取');
     loadPreselect(state.date);
+    loadReviewText(state.date);
     refreshIcons();
+  }
+
+  // 四层复盘文本：读 data/review_text/<date>.txt
+  async function loadReviewText(date) {
+    els.reviewTextMeta.textContent = '—';
+    try {
+      const res = await fetch('/api/review_text?date=' + encodeURIComponent(date));
+      let data = null;
+      try { data = await res.json(); } catch (e) { data = null; }
+      if (!data || !data.ok) {
+        els.reviewTextBody.innerHTML = '<div class="plan-empty">该日暂无复盘文本</div>';
+        return;
+      }
+      RichText.renderInto(data.text, els.reviewTextBody);
+      els.reviewTextMeta.textContent = data.date + ' · ' + (data.text || '').split('\n').length + ' 行';
+    } catch (err) {
+      els.reviewTextBody.innerHTML = '<div class="plan-empty">加载失败</div>';
+    }
   }
 
   // 情绪节点预选票：读某日 sentiment JSON 里的 preselect 字段

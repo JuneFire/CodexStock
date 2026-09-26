@@ -1545,6 +1545,12 @@ input[type="search"] {
   margin-bottom: 16px;
 }
 
+.review-text-body {
+  padding: 6px 20px 20px;
+  max-height: 640px;
+  overflow-y: auto;
+}
+
 .review-section .panel-head.sub {
   border-top: 1px solid var(--border);
   padding-top: 12px;

@@ -70,6 +70,7 @@ MONEY_RULES_FILE = os.path.join(DATA_DIR, "money_rules.json")  # 赚钱效应阈
 LEADERSHIP_DIR = os.path.join(DATA_DIR, "leadership")  # 卡位晋级检测
 NEWSTOCKS_DIR = os.path.join(DATA_DIR, "newstocks")  # 上市首日/次新(N/C)当日快照
 CONGESTION_DIR = os.path.join(DATA_DIR, "congestion")  # 量窒息检测
+REVIEW_TEXT_DIR = os.path.join(DATA_DIR, "review_text")  # 每日四层复盘文本（大盘/情绪/板块/个股）
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -1162,6 +1163,47 @@ def load_plan(date_str):
     return {"ok": True, "date": date_str, "text": text}
 
 
+def list_review_text_dates():
+    """data/review_text/ 下已有的四层复盘文本日期列表，倒序。"""
+    if not os.path.isdir(REVIEW_TEXT_DIR):
+        return []
+    try:
+        names = sorted(f for f in os.listdir(REVIEW_TEXT_DIR) if f.endswith(".txt"))
+    except OSError:
+        return []
+    return [n[:-4] for n in names][::-1]
+
+
+def load_review_text(date_str):
+    """读取某日四层复盘文本。返回 {"ok", "date", "text"}；无则 {"ok": False, "error"}。"""
+    path = os.path.join(REVIEW_TEXT_DIR, date_str + ".txt")
+    if not os.path.isfile(path):
+        return {"ok": False, "error": "未找到该日复盘文本: %s" % date_str}
+    try:
+        with open(path, encoding="utf-8-sig") as f:  # 兼容带 BOM
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            return {"ok": False, "error": "复盘文本读取失败: %s" % exc}
+    return {"ok": True, "date": date_str, "text": text}
+
+
+def save_review_text(date_str, text):
+    """写入某日四层复盘文本（utf-8-sig）。返回是否成功。"""
+    try:
+        os.makedirs(REVIEW_TEXT_DIR, exist_ok=True)
+        path = os.path.join(REVIEW_TEXT_DIR, date_str + ".txt")
+        with open(path, "w", encoding="utf-8-sig") as f:
+            f.write(text)
+        return True
+    except OSError as exc:
+        print("[review_text] 写入失败 %s: %r" % (date_str, exc), flush=True)
+        return False
+
+
 # ---------- 早盘预案自动生成 ----------
 def _fetch_plan_news():
     """抓取隔夜财经快讯（东财优先，新浪/同花顺降级）。返回最近几条文本摘要。"""
@@ -1308,6 +1350,124 @@ def _build_plan_text(today, review):
     lines.append("总结")
     lines.append("昨日情绪%s。今日要消化分歧后选择方向,聚焦领涨细分,风格轮动注意节奏。投资有风险,入市需谨慎!" % label)
     return "\n".join(lines)
+
+
+def _build_review_text(date_str, review):
+    """基于当日复盘数据生成四层复盘文本（数据版）。无外部口径、无主观判断。"""
+    lines = []
+    lines.append("# %s 复盘（数据版）" % date_str)
+    lines.append("")
+    if not review:
+        lines.append("## 数据缺失")
+        lines.append("当日复盘记录不存在，无法生成。")
+        lines.append("")
+        lines.append("## 风险提示")
+        lines.append("投资有风险，入市需谨慎！")
+        return "\n".join(lines)
+
+    idx = review.get("indices") or []
+    breadth = review.get("breadth") or {}
+    pools = review.get("pools") or {}
+    lb = review.get("lianban") or {}
+    tier = lb.get("tier") or {}
+    zt_meta = pools.get("ztMeta") or {}
+    prev = pools.get("prev") or {}
+
+    # 一、大盘
+    lines.append("## 一、大盘")
+    lines.append("")
+    lines.append("### 指数")
+    for i in idx:
+        lines.append("%s 开%s 收%s %s 成交%s亿" % (
+            i.get("name", "—"),
+            ("%.2f" % i["open"]) if i.get("open") is not None else "—",
+            ("%.2f" % i["close"]) if i.get("close") is not None else "—",
+            ("%+.2f%%" % i["changePct"]) if i.get("changePct") is not None else "—",
+            ("%.0f" % i["amountYi"]) if i.get("amountYi") is not None else "—",
+        ))
+    lines.append("")
+    lines.append("### 涨跌家数")
+    lines.append("涨 %s / 跌 %s / 平 %s" % (
+        breadth.get("up", "—"), breadth.get("down", "—"), breadth.get("flat", "—")))
+    lines.append("")
+    sh = next((i for i in idx if i.get("name") == "上证指数"), {})
+    if sh.get("marketAmountYi") is not None:
+        lines.append("### 量能")
+        lines.append("两市成交 %.2f亿，环比 %s亿（%s）" % (
+            sh["marketAmountYi"],
+            ("%+.2f" % sh["marketAmountChangeYi"]) if sh.get("marketAmountChangeYi") is not None else "—",
+            ("%+.2f%%" % sh["marketAmountChangePct"]) if sh.get("marketAmountChangePct") is not None else "—",
+        ))
+        lines.append("")
+
+    # 二、情绪
+    lines.append("## 二、情绪")
+    lines.append("")
+    lines.append("### 涨跌停")
+    lines.append("涨停 %s家，跌停 %s家，炸板 %s家" % (
+        pools.get("ztCount", "—"), pools.get("dtCount", "—"), pools.get("zbCount", "—")))
+    if prev.get("ztPremium") is not None:
+        lines.append("昨涨停溢价 %+.2f%%" % prev["ztPremium"])
+    lines.append("")
+    lines.append("### 连板梯队")
+    lines.append("最高 %s板" % (lb.get("maxTier") or "—"))
+    for key, n in (("8", 8), ("7", 7), ("6", 6), ("5", 5), ("4", 4), ("3", 3), ("2", 2)):
+        stocks = tier.get(key) or []
+        if stocks:
+            lines.append("%d板 %d只：%s" % (n, len(stocks), "、".join(s.get("name", "") for s in stocks)))
+    first = tier.get("first") or []
+    if first:
+        lines.append("首板 %d只：%s" % (len(first), "、".join(s.get("name", "") for s in first)))
+    tier_total = sum(len(v or []) for v in tier.values())
+    lines.append("梯队合计 %d家（当日涨停 %s家，差额为未分类个股）" % (tier_total, pools.get("ztCount", "—")))
+    lines.append("")
+
+    # 三、板块
+    lines.append("## 三、板块")
+    lines.append("")
+    lines.append("### 行业分布（本地口径）")
+    front = zt_meta.get("frontSectors") or []
+    if front:
+        for f in front[:8]:
+            lines.append("%s %s家" % (f.get("name"), f.get("count")))
+    else:
+        lines.append("—")
+    lines.append("")
+    lines.append("外部口径（题材资金/涨停原因/首封时间）待 skill 补充。")
+    lines.append("")
+
+    # 四、个股
+    lines.append("## 四、个股")
+    lines.append("")
+    lines.append("### 封单前列")
+    seal = zt_meta.get("sealYi") or []
+    if seal:
+        for s in seal[:8]:
+            lines.append("%s %s %.2f亿" % (s.get("name", ""), s.get("industry", ""), s.get("sealYi") or 0))
+    else:
+        lines.append("—")
+    lines.append("")
+    lines.append("竞价口径（委买留存/假强识别）与涨停原因待 skill 补充。")
+    lines.append("")
+    lines.append("## 风险提示")
+    lines.append("投资有风险，入市需谨慎！")
+    return "\n".join(lines)
+
+
+def _run_review_text(date_str):
+    """收盘后生成四层复盘文本（数据版）。已存在则不覆盖，保留 skill 生成的富文本。"""
+    try:
+        path = os.path.join(REVIEW_TEXT_DIR, date_str + ".txt")
+        if os.path.isfile(path):
+            return False
+        review = db.read_review(date_str)
+        if save_review_text(date_str, _build_review_text(date_str, review)):
+            print("[review_text] %s 数据版已生成" % date_str, flush=True)
+            return True
+        return False
+    except Exception as exc:
+        print("[review_text] %s 生成失败: %r" % (date_str, exc), flush=True)
+        return False
 
 
 # ---------- 行业指数合成（头马/黑马） ----------
@@ -1694,6 +1854,7 @@ def _run_close_sample():
         codes = [s.get("code") for s in stocks if s.get("code")]
         baseline = fetch_realtime_baseline(codes)  # 收盘后返回当日全天成交额/换手/收盘
         pct_map = {c: b.get("changePct") for c, b in baseline.items()}
+        price_map = {c: b.get("close") for c, b in baseline.items()}
         date = snapshot.get("date")
         if baseline:
             # 保存当日全天基准，次日 9:25 抓竞价时直接读缓存，跳过逐只拉日K
@@ -1701,7 +1862,7 @@ def _run_close_sample():
                 print("[close] 基准入库失败: %s" % db.last_error(), flush=True)
             else:
                 print("[close] 全天基准已入库: %s %d 只" % (date, len(baseline)), flush=True)
-        if not db.save_close_pct(date, pct_map):
+        if not db.save_close_pct(date, pct_map, price_map=price_map):
             print("[close] 入库失败: %s" % db.last_error(), flush=True)
         else:
             print("[close] 收盘涨幅已入库: %s %d 只" % (date, len(pct_map)), flush=True)
@@ -1729,6 +1890,7 @@ def _run_close_review():
         save_newstocks(date)  # 当日 N/C 名单快照（前缀次日漂移，必须当天存）
         scan_leadership(date)  # 卡位晋级检测
         scan_congestion(date)  # 量窒息（缩量横盘）检测
+        _run_review_text(date)  # 四层复盘文本（数据版，不覆盖 skill 生成的富文本）
         print("[close] 当日复盘已自动生成并入库: %s" % date, flush=True)
     except Exception as exc:
         print("[close] 自动生成复盘失败: %r" % exc, flush=True)
@@ -4077,6 +4239,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self.send_json(load_plan(date))
             return
+        if parsed.path == "/api/review_text/dates":
+            self.send_json({"ok": True, "dates": list_review_text_dates()})
+            return
+        if parsed.path == "/api/review_text":
+            date = (parse_qs(parsed.query).get("date") or [""])[0]
+            if not date:
+                self.send_json({"ok": False, "error": "缺少 date 参数"}, status=400)
+                return
+            self.send_json(load_review_text(date))
+            return
         if parsed.path == "/api/preselect":
             date = (parse_qs(parsed.query).get("date") or [""])[0]
             if not date:
@@ -4303,6 +4475,9 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/env":
             self._post_env()
             return
+        if parsed.path == "/api/review_text":
+            self._post_review_text()
+            return
         if parsed.path != "/api/review":
             self.send_json({"ok": False, "error": "未知接口"}, status=404)
             return
@@ -4331,6 +4506,25 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True})
         else:
             self.send_json({"ok": False, "error": "保存失败: %s" % db.last_error()}, status=502)
+
+    def _post_review_text(self):
+        """保存某日四层复盘文本。body {date, text}"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            payload = json.loads(body) if body else {}
+        except Exception as exc:
+            self.send_json({"ok": False, "error": "请求体解析失败: %s" % exc}, status=400)
+            return
+        date = str(payload.get("date") or "").strip()
+        text = payload.get("text")
+        if not date or not isinstance(text, str):
+            self.send_json({"ok": False, "error": "缺少 date 或 text"}, status=400)
+            return
+        if save_review_text(date, text):
+            self.send_json({"ok": True})
+        else:
+            self.send_json({"ok": False, "error": "复盘文本写入失败"}, status=502)
 
     def _post_env(self):
         """人工覆盖某日赚钱环境结论。body {date, manual:{state,label,tone,advice,note}}"""
