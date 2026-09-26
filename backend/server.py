@@ -849,6 +849,21 @@ def _build_snapshot(auto=False):
         if pa:
             matched += 1
     print("[fetch] 昨日竞价额匹配 %d/%d" % (matched, len(stocks)), flush=True)
+
+    # 封单额：对同一批股票取腾讯买一量×买一价（与封单采样同源）；无买一则为 None
+    try:
+        seal_map = fetch_seal_quotes([s["code"] for s in stocks if s.get("code")])
+    except Exception as exc:
+        print("[fetch] 封单额获取失败: %r" % exc, flush=True)
+        seal_map = {}
+    seal_hit = 0
+    for s in stocks:
+        q = seal_map.get(s.get("code"))
+        s["sealAmount"] = q.get("sealAmount") if q else None
+        if s["sealAmount"]:
+            seal_hit += 1
+    print("[fetch] 封单额匹配 %d/%d" % (seal_hit, len(stocks)), flush=True)
+
     stocks.sort(key=lambda s: (s.get("score") or 0), reverse=True)
     for idx, stock in enumerate(stocks, start=1):
         stock["rank"] = idx

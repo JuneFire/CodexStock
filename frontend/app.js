@@ -588,9 +588,9 @@
           <td class="num ${colorCls(s.changePct)}">${fmtPct(s.changePct)}</td>
           <td class="num col-realtime ${rtCls(state.realtime[s.code])}">${state.realtime[s.code] != null ? fmtPct(state.realtime[s.code]) : '—'}</td>
           <td class="num col-amount amount-strong">${fmtAmountYuan(s.auctionAmount)}</td>
+          <td class="num col-seal ${s.sealAmount ? 'seal-strong' : 'amount-dim'}">${s.sealAmount ? fmtAmountYuan(s.sealAmount) : '—'}</td>
           <td class="num col-yamount amount-dim">${fmtAmountYuan(s.yesterdayAmount)}</td>
           <td class="num col-prevAmount">${prevAmt}</td>
-          <td class="num col-ratio ${colorCls((s.ratioToYesterday || 0) - 10)}">${fmtNum(s.ratioToYesterday, 1)}%</td>
           <td class="num col-strength ${levelCls(s.amountStrength, 100, 30)}">${fmtNum(s.amountStrength, 1)}</td>
           <td class="num col-auctionTurnover ${levelCls(s.auctionTurnover, 1.5, 0.8)}">${fmtNum(s.auctionTurnover, 2)}%</td>
           <td class="num col-market">${fmtYi(s.floatCap)}</td>
@@ -636,6 +636,7 @@
     const tags = s.tags || [];
     const metrics = [
       ['竞价金额', fmtAmountYuan(s.auctionAmount)],
+      ['封单额', s.sealAmount == null ? '—' : fmtAmountYuan(s.sealAmount)],
       ['昨日成交额', fmtAmountYuan(s.yesterdayAmount)],
       ['昨日竞价额', s.prevAuctionAmount == null ? '—'
         : fmtAmountYuan(s.prevAuctionAmount) + (s.auctionVsPrev == null ? '' : '　今日 ×' + fmtNum(s.auctionVsPrev, 2))],
@@ -879,7 +880,7 @@
   }
 
   // ---------- CSV 导入导出 ----------
-  const CSV_HEADERS = ['代码', '名称', '板块', '竞价价', '竞价涨幅', '竞价金额(元)', '竞价量(手)', '竞价换手(%)', '流通市值(元)', '昨日成交额(元)', '昨日竞价额(元)', '昨日占比(%)', '金额强度(bp)', '超预期分', '状态'];
+  const CSV_HEADERS = ['代码', '名称', '板块', '竞价价', '竞价涨幅', '竞价金额(元)', '封单额(元)', '竞价量(手)', '竞价换手(%)', '流通市值(元)', '昨日成交额(元)', '昨日竞价额(元)', '昨日占比(%)', '金额强度(bp)', '超预期分', '状态'];
 
   function normalizeKey(s) {
     return String(s).toLowerCase().replace(/[\s（）()%％]/g, '');
@@ -892,6 +893,7 @@
     price: ['竞价价', '竞价价格', '竞价', 'price'],
     changePct: ['竞价涨幅', '涨幅', '竞价涨跌幅', '涨跌幅', 'changePct'],
     auctionAmount: ['竞价金额', '竞价成交额', '竞价额', 'auctionAmount'],
+    sealAmount: ['封单额', '封单', 'sealAmount'],
     auctionVolume: ['竞价量', '竞价成交量', 'auctionVolume'],
     turnover: ['竞价换手', '竞价换手率', 'auctionTurnover'],
     volumeRatio: ['量比', 'volumeRatio'],
@@ -1057,7 +1059,7 @@
     }
     const lines = rows.map(s => [
       s.code, s.name, s.industry, s.price, s.changePct,
-      s.auctionAmount, s.auctionVolume, s.auctionTurnover,
+      s.auctionAmount, (s.sealAmount == null ? '' : s.sealAmount), s.auctionVolume, s.auctionTurnover,
       s.floatCap, s.yesterdayAmount, (s.prevAuctionAmount == null ? '' : s.prevAuctionAmount),
       s.ratioToYesterday, s.amountStrength,
       s.score, (s.tags || []).join('|')

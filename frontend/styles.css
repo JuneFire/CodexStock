@@ -680,6 +680,12 @@ input[type="search"] {
   color: var(--text-3);
 }
 
+/* 封单额：有买一挂单时强调（区别于竞价金额的青色） */
+.seal-strong {
+  color: var(--warn);
+  font-weight: 600;
+}
+
 /* 竞价额放大倍数（今日竞价额 / 昨日竞价额），颜色沿用 .up/.down */
 .mul {
   font-style: normal;
@@ -1310,6 +1316,7 @@ input[type="search"] {
 }
 
 @media (max-width: 980px) {
+  .col-seal,
   .col-strength,
   .col-auctionTurnover,
   .col-market {
