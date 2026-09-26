@@ -1858,6 +1858,17 @@ input[type="search"] {
 .env-ice  { background: var(--accent-bg); color: var(--accent-strong); }
 .env-ice  .env-dot { background: var(--accent); }
 
+/* 同花顺四情绪指标的读数列（首板/涨停/连板/炸板） */
+.ths-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: 4px; }
+.ths-chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 7px; border-radius: 999px;
+  background: var(--surface-3); color: var(--text-2);
+  font-size: 11px; white-space: nowrap;
+}
+.ths-chip em { font-style: normal; font-weight: 600; }
+#thsBanner .env-banner + .env-banner { margin-top: 6px; }
+
 
 /* ---------- 赚钱环境页 ---------- */
 .env-main {

@@ -337,6 +337,7 @@
     sectorChips: $('#sectorChips'),
     stats: $('#stats'),
     envBanner: $('#envBanner'),
+    thsBanner: $('#thsBanner'),
     searchInput: $('#searchInput'),
     watchOnly: $('#watchOnly'),
     resultCount: $('#resultCount'),
@@ -456,6 +457,51 @@
       <span class="env-advice">${esc(env.advice || '')}${top1}</span>
     `;
     els.envBanner.hidden = false;
+  }
+
+  // 同花顺四情绪指标（首板/涨停/连板/炸板）：昨日收盘环境 + 今日竞价情绪
+  function fmtChg(v) {
+    if (v == null) return '—';
+    return (v > 0 ? '+' : '') + Number(v).toFixed(2) + '%';
+  }
+  function chgCls(v) {
+    return v == null ? '' : (v > 0 ? 'up' : (v < 0 ? 'down' : ''));
+  }
+  function renderThsBanner(d) {
+    if (!d || !d.ok) { els.thsBanner.hidden = true; return; }
+    const c = d.close || {}, a = d.auction || {};
+    const chips = arr => (arr || []).map(x =>
+      `<span class="ths-chip">${esc(x.name)}<em class="${chgCls(x.chg)}">${fmtChg(x.chg)}</em></span>`).join('');
+    const rows = [];
+    if (c.state) {
+      rows.push(`
+        <div class="env-banner ${c.tone || 'env-warn'}">
+          <span class="env-dot"></span>
+          <span class="env-label"><b>情绪环境 ${esc(c.state)}</b>${c.date ? '（' + esc(c.date) + '收盘）' : ''}</span>
+          <span class="env-advice">${esc(c.advice || '')}${c.cum5 == null ? '' : '　·　涨停指数近5日 ' + fmtChg(c.cum5)}</span>
+          <span class="ths-chips">${chips(c.chg)}</span>
+        </div>`);
+    }
+    if (a.state) {
+      rows.push(`
+        <div class="env-banner ${a.tone || 'env-warn'}">
+          <span class="env-dot"></span>
+          <span class="env-label"><b>竞价情绪 ${esc(a.state)}</b></span>
+          <span class="env-advice">${esc(a.advice || '')}</span>
+          <span class="ths-chips">${chips(a.chg)}</span>
+        </div>`);
+    }
+    if (!rows.length) { els.thsBanner.hidden = true; return; }
+    els.thsBanner.innerHTML = rows.join('');
+    els.thsBanner.hidden = false;
+  }
+  async function loadThsEmotion() {
+    try {
+      const r = await fetch('/api/ths/emotion');
+      renderThsBanner(await r.json());
+    } catch (e) {
+      els.thsBanner.hidden = true;
+    }
   }
 
   function getFiltered() {
@@ -1125,6 +1171,9 @@
     bindEvents();
     setDemoData();
     loadLatest();
+    loadThsEmotion();
+    // 竞价情绪盘中会变，60 秒刷一次（后端也有 60 秒缓存）
+    setInterval(loadThsEmotion, 60000);
   }
 
   init();

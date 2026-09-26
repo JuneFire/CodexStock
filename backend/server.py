@@ -3553,6 +3553,136 @@ def load_newstocks(date_str):
         return None
 
 
+# ---------- 同花顺短线情绪四指标（环境刻度 + 竞价情绪） ----------
+# 说明：这四个指数衡量「昨日涨停/连板/首板/炸板的那批票，今天整体是赚是亏」。
+#   · 昨日收盘值 → 环境（情绪周期位置）
+#   · 当日实时值 → 竞价承接强弱（9:25 后即为竞价读数）
+THS_EMOTION = (("883979", "首板"), ("883900", "涨停"), ("883958", "连板"), ("883918", "炸板"))
+THS_ICE5 = -8.0            # 涨停指数近 5 日累计 <= 此值 → 冰点区
+_ths_cache = {"at": 0.0, "data": None}
+_THS_TTL = 60              # 秒
+
+
+def _ths_fetch(url):
+    """取同花顺 jsonp 接口。响应形如 quotebridge_xxx({...});"""
+    import re as _re
+    resp = _session.get(url, headers={"User-Agent": UA, "Referer": "http://q.10jqka.com.cn/"},
+                        timeout=15)
+    resp.raise_for_status()
+    m = _re.search(r"\((.*)\)\s*;?\s*$", resp.text, _re.S)
+    if not m:
+        raise ValueError("非 jsonp 响应")
+    return json.loads(m.group(1))
+
+
+def _ths_daily(code):
+    """日线序列 [{date, close}]（约 140 个交易日）。"""
+    d = _ths_fetch("http://d.10jqka.com.cn/v6/line/bk_%s/01/last.js" % code)
+    out = []
+    for seg in (d.get("data") or "").split(";"):
+        p = seg.split(",")
+        if len(p) >= 5 and p[0].isdigit():
+            out.append({"date": "%s-%s-%s" % (p[0][:4], p[0][4:6], p[0][6:]),
+                        "close": to_float(p[4])})
+    return out
+
+
+def _ths_realtime(code):
+    """实时最新值。非交易时段等于最近收盘。"""
+    d = _ths_fetch("http://d.10jqka.com.cn/v6/realhead/bk_%s/defer/last.js" % code)
+    return to_float((d.get("items") or {}).get("10"))
+
+
+def _ths_pct(a, b):
+    return round((a / b - 1) * 100, 2) if (a and b) else None
+
+
+def _ths_close_state(chg, cum5):
+    """昨日收盘 → 环境态。chg 为四指数最近收盘日涨跌幅。"""
+    r1, r2, r3, r4 = (chg.get("883979"), chg.get("883900"),
+                      chg.get("883958"), chg.get("883918"))
+    if None in (r1, r2, r3, r4):
+        return None, None, "数据不足"
+    if cum5 is not None and cum5 <= THS_ICE5 and sum(1 for x in (r1, r2, r3, r4) if x > 0) >= 2:
+        return "冰点", "env-ice", "四指标深跌后今日部分转正，情绪反转临近"
+    if r1 > 0 and r2 > 0 and r3 > 0 and r4 >= 0:
+        return "上升", "env-pos", "四指标同步上行，情绪升温，竞价强势股承接好"
+    if r3 > 0 and (r1 < 0 or r4 < 0):
+        return "分歧→退潮", "env-warn", "连板仍强但首板/炸板走弱，高度在、承接面在烂，谨慎追高"
+    if r2 < 0 and r4 < 0:
+        return "退潮", "env-neg", "涨停与炸板双弱，亏钱效应扩大，竞价强势股易冲高回落"
+    return "分歧", "env-warn", "多空交织，看题材持续性，回避孤军"
+
+
+def _ths_auction_state(chg):
+    """当日实时（9:25 后即竞价读数）→ 竞价承接强弱。"""
+    a1, a2, a3, a4 = (chg.get("883979"), chg.get("883900"),
+                      chg.get("883958"), chg.get("883918"))
+    if None in (a1, a2, a3, a4):
+        return None, None, "数据不足"
+    if a1 > 0 and a2 > 0 and a3 > 0 and a4 >= 0:
+        return "承接强", "env-pos", "昨日涨停板今日竞价整体高开，资金愿意接"
+    if a2 < 0 and a4 < 0:
+        return "承接待观察", "env-neg", "昨涨停与昨炸板今日竞价双弱，追高需谨慎"
+    if a3 > 0 and (a1 < 0 or a4 < 0):
+        return "高度独强", "env-warn", "只有连板在竞价走强，首板/炸板偏弱，防高位分歧"
+    return "中性", "env-warn", "竞价多空均衡，看个股自身强度"
+
+
+def ths_emotion(force=False):
+    """返回 {close: 环境读数, auction: 竞价读数}。带 60 秒缓存。"""
+    now = time.time()
+    if not force and _ths_cache["data"] and (now - _ths_cache["at"]) < _THS_TTL:
+        return _ths_cache["data"]
+    today = datetime.now().strftime("%Y-%m-%d")
+    daily, rt = {}, {}
+    for code, short in THS_EMOTION:
+        try:
+            daily[code] = _ths_daily(code)
+        except Exception as exc:
+            print("[ths] 取 %s 日线失败: %r" % (code, exc), flush=True)
+            daily[code] = []
+        try:
+            rt[code] = _ths_realtime(code)
+        except Exception as exc:
+            print("[ths] 取 %s 实时失败: %r" % (code, exc), flush=True)
+            rt[code] = None
+    if not any(daily.values()):
+        return {"ok": False, "error": "取不到同花顺情绪指标"}
+
+    close_chg, close_date = {}, None
+    for code, _ in THS_EMOTION:
+        d = daily.get(code) or []
+        if len(d) >= 2:
+            close_chg[code] = _ths_pct(d[-1]["close"], d[-2]["close"])
+            close_date = close_date or d[-1]["date"]
+    cum5 = None
+    zd = daily.get("883900") or []
+    if len(zd) >= 6:
+        cum5 = _ths_pct(zd[-1]["close"], zd[-6]["close"])
+
+    auction_chg = {}
+    for code, _ in THS_EMOTION:
+        d = daily.get(code) or []
+        prev = next((r["close"] for r in reversed(d) if r["date"] < today), None)
+        if rt.get(code) and prev:
+            auction_chg[code] = _ths_pct(rt[code], prev)
+
+    c_state, c_tone, c_advice = _ths_close_state(close_chg, cum5)
+    a_state, a_tone, a_advice = _ths_auction_state(auction_chg)
+
+    def pack(chg):
+        return [{"code": c, "name": n, "chg": chg.get(c)} for c, n in THS_EMOTION]
+
+    res = {"ok": True, "today": today,
+           "close": {"date": close_date, "state": c_state, "tone": c_tone,
+                     "advice": c_advice, "chg": pack(close_chg), "cum5": cum5},
+           "auction": {"state": a_state, "tone": a_tone,
+                       "advice": a_advice, "chg": pack(auction_chg)}}
+    _ths_cache["at"], _ths_cache["data"] = now, res
+    return res
+
+
 def _dir_dates(dirpath):
     if not os.path.isdir(dirpath):
         return set()
@@ -3995,6 +4125,13 @@ class Handler(SimpleHTTPRequestHandler):
                 days = 30
             rows, alerts = money_feed(max(1, min(days, 120)))
             self.send_json({"ok": True, "rows": rows, "alerts": alerts})
+            return
+        if parsed.path == "/api/ths/emotion":
+            try:
+                force = (parse_qs(parsed.query).get("force") or [""])[0] == "1"
+                self.send_json(ths_emotion(force=force))
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=502)
             return
         if parsed.path == "/api/newstocks":
             qs = parse_qs(parsed.query)
