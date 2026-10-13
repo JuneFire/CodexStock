@@ -71,6 +71,7 @@ LEADERSHIP_DIR = os.path.join(DATA_DIR, "leadership")  # 卡位晋级检测
 NEWSTOCKS_DIR = os.path.join(DATA_DIR, "newstocks")  # 上市首日/次新(N/C)当日快照
 CONGESTION_DIR = os.path.join(DATA_DIR, "congestion")  # 量窒息检测
 REVIEW_TEXT_DIR = os.path.join(DATA_DIR, "review_text")  # 每日四层复盘文本（大盘/情绪/板块/个股）
+AUCTION_TOP_DIR = os.path.join(DATA_DIR, "auction_top")  # 竞价额前N榜单归档（文件兜底，MySQL 不可用时降级读这里）
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -1891,16 +1892,70 @@ def fetch_auction_top(n=AUCTION_TOP_RANK_N):
     }
 
 
+def save_auction_top_file(snap):
+    """竞价榜抓取结果落盘 data/auction_top/<date>.json（纯文件，不依赖 MySQL）。返回 (ok, msg)。"""
+    records = snap.get("records") or []
+    if not records:
+        return False, "竞价榜抓取为空"
+    date_str = snap.get("date") or datetime.now().strftime("%Y-%m-%d")
+    os.makedirs(AUCTION_TOP_DIR, exist_ok=True)
+    payload = {
+        "date": date_str,
+        "fetchedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "records": records,
+    }
+    path = os.path.join(AUCTION_TOP_DIR, date_str + ".json")
+    with _lock:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    return True, date_str
+
+
+def _auction_top_json_dates(limit=120):
+    """竞价榜归档日期列表（倒序），纯文件。"""
+    out = []
+    if os.path.isdir(AUCTION_TOP_DIR):
+        for name in os.listdir(AUCTION_TOP_DIR):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(AUCTION_TOP_DIR, name)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                count = len(data.get("records") or [])
+            except Exception:
+                continue
+            out.append({"date": name[:-5], "count": count})
+    out.sort(key=lambda d: d["date"], reverse=True)
+    return out[:limit]
+
+
+def _auction_top_json_day(date_str):
+    """读某日竞价榜（纯文件），按 rank 升序。无则返回 None。"""
+    path = os.path.join(AUCTION_TOP_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    records = data.get("records") or []
+    records.sort(key=lambda r: r.get("rank") or 0)
+    return records
+
+
 def _run_auction_top_sample():
     try:
         snap = fetch_auction_top()
-        if not snap["records"]:
-            print("[auction-top] 竞价榜抓取为空，跳过入库", flush=True)
+        ok, msg = save_auction_top_file(snap)
+        if not ok:
+            print("[auction-top] %s，跳过落盘" % msg, flush=True)
             return
+        # 文件归档是权威降级源；同时写 MySQL，数据库不可用只记日志不影响页面
         if not db.save_auction_top(snap["records"]):
-            print("[auction-top] 入库失败: %s" % db.last_error(), flush=True)
-        else:
-            print("[auction-top] 竞价额榜单入库（%d 条）" % len(snap["records"]), flush=True)
+            print("[auction-top] MySQL 入库失败: %s" % db.last_error(), flush=True)
+        print("[auction-top] 竞价额榜单落盘（%d 条）" % len(snap["records"]), flush=True)
     except Exception as exc:
         print("[auction-top] 抓取失败: %r" % exc, flush=True)
 
@@ -4525,35 +4580,39 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/auction_top/dates":
             try:
-                self.send_json({"ok": True, "dates": db.list_auction_top_dates()})
+                dates = db.list_auction_top_dates()
             except Exception as exc:
-                self.send_json({"ok": False, "error": "MySQL 不可用: %s" % exc}, status=502)
+                # MySQL 不可用 → 降级读 data/auction_top/*.json 归档
+                self.send_json({"ok": True, "dates": _auction_top_json_dates(),
+                                "fallback": True, "error": "MySQL 不可用，已从 JSON 归档读取: %s" % exc})
+                return
+            self.send_json({"ok": True, "dates": dates})
             return
         if parsed.path == "/api/auction_top":
             date = (parse_qs(parsed.query).get("date") or [""])[0]
             if not date:
                 self.send_json({"ok": False, "error": "缺少 date 参数"}, status=400)
                 return
+            fallback = False
             try:
                 rows = db.get_auction_top(date)
-            except Exception as exc:
-                self.send_json({"ok": False, "error": "MySQL 不可用: %s" % exc}, status=502)
-                return
+            except Exception:
+                rows = _auction_top_json_day(date)
+                fallback = rows is not None
             if not rows:
                 self.send_json({"ok": False, "error": "未找到该日期竞价榜数据: %s" % date}, status=404)
             else:
-                self.send_json({"ok": True, "date": date, "rows": rows})
+                self.send_json({"ok": True, "date": date, "rows": rows, "fallback": fallback})
             return
         if parsed.path == "/api/auction_top/refresh":
             try:
                 snap = fetch_auction_top()
-                if not snap["records"]:
-                    self.send_json({"ok": False, "error": "竞价榜抓取为空"}, status=502)
+                ok, msg = save_auction_top_file(snap)
+                if not ok:
+                    self.send_json({"ok": False, "error": msg}, status=502)
                     return
-                if not db.save_auction_top(snap["records"]):
-                    self.send_json({"ok": False, "error": "入库失败: %s" % db.last_error()}, status=502)
-                else:
-                    self.send_json({"ok": True, "date": snap["date"], "count": len(snap["records"])})
+                db.save_auction_top(snap["records"])  # MySQL 失败只记日志，文件归档已兜底
+                self.send_json({"ok": True, "date": snap["date"], "count": len(snap["records"])})
             except Exception as exc:
                 self.send_json({"ok": False, "error": "抓取失败: %s" % exc}, status=502)
             return
