@@ -117,6 +117,7 @@ _lock = threading.Lock()
 _fetch_lock = threading.Lock()
 _review_lock = threading.Lock()
 _trading_day_cache = {}  # 按日期缓存交易日判断结果，避免窗口内每次检查都请求接口
+_trading_calendar_cache = {}  # 按月份缓存深交所交易日历（None=接口不可用，避免反复打接口）
 
 # 复盘抓取进度：{date: {stage, percent, message, done}}，供前端进度条轮询
 _review_progress = {}
@@ -145,6 +146,7 @@ SEAL_BATCH_SIZE = 500       # 腾讯批量直连每批股票数
 SEAL_TOP_N = 20             # 全市场封单额取前 N
 
 AUCTION_TOP_N = 50          # 竞价金额抓取前 N 只（腾讯/东财/akshare 统一）
+AUCTION_TOP_RANK_N = 60     # 竞价榜页面取竞价额前 N（按日期归档）
 
 PLAN_FETCH_HM = 8 * 60 + 30  # 早晨 8:30 自动生成当天早盘预案
 PLAN_NEWS_LIMIT = 8          # 预案引用的隔夜快讯条数
@@ -210,36 +212,50 @@ def to_float(value):
         return None
 
 
+def _fetch_month_trading_days(month):
+    """深交所交易日历：返回该月交易日日期集合（YYYY-MM-DD），失败返回 None。
+
+    接口 https://www.szse.cn/api/report/exchange/onepersistenthour/monthList?month=YYYY-MM
+    返回 data[].jyrq（日期）+ jybz（1=交易日，0=休市日），公开、无需解码。
+    """
+    try:
+        resp = _session.get(
+            "https://www.szse.cn/api/report/exchange/onepersistenthour/monthList",
+            params={"month": month},
+            headers={"Referer": "https://www.szse.cn/"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        rows = (resp.json() or {}).get("data") or []
+        return {str(r["jyrq"]) for r in rows if str(r.get("jybz")) == "1"}
+    except Exception:
+        return None
+
+
 def is_trading_day(now=None):
+    """今天是否 A 股交易日：直接查深交所交易日历（公开接口），休市日一律 False。
+
+    四个自动任务（预案 8:30 / 封单 9:15 / 竞价 9:25 / 收盘 15:05）入口都先过这里，
+    非交易日根本不启动，从根上避免节假日误跑、误推送。日历接口不可用时按工作日
+    兜底为 True（宁可多跑，不漏抓交易日数据）。
+    """
     now = now or datetime.now()
     if now.weekday() >= 5:
         return False
     today = now.strftime("%Y-%m-%d")
     if today in _trading_day_cache:
         return _trading_day_cache[today]
-    result = False
-    try:  # 腾讯实时快照优先：竞价窗口内日K尚未收录当天，实时报价更可靠
-        import io
-        import contextlib
-        with contextlib.redirect_stderr(io.StringIO()):
-            df = ak.stock_zh_a_spot_tx()
-        result = df is not None and not df.empty
-    except Exception:
-        try:  # 腾讯日线回退
-            import io
-            import contextlib
-            start = (now - timedelta(days=14)).strftime("%Y%m%d")
-            with contextlib.redirect_stderr(io.StringIO()):
-                df = ak.stock_zh_a_hist_tx(symbol="sh000001", start_date=start,
-                                           end_date=now.strftime("%Y%m%d"), adjust="")
-            result = df is not None and not df.empty and str(df.iloc[-1]["date"]) == today
-        except Exception:
-            try:  # 东财回退（原逻辑）
-                data = http_json(KLINE_URL.format(secid="1.000001"))
-                klines = ((data.get("data") or {}).get("klines")) or []
-                result = any((line.split(",")[0] if line else "") == today for line in klines)
-            except Exception:
-                result = True
+
+    month = now.strftime("%Y-%m")
+    if month not in _trading_calendar_cache:
+        _trading_calendar_cache[month] = _fetch_month_trading_days(month)
+    days = _trading_calendar_cache[month]
+
+    if days is None:
+        result = True  # 接口不可用：宁可按交易日跑，避免漏抓
+    else:
+        result = today in days
+
     _trading_day_cache[today] = result
     return result
 
@@ -327,7 +343,7 @@ def _parse_paging(qs, default_page=1, default_size=30):
     )
 
 
-def fetch_auction_snapshot():
+def fetch_auction_snapshot(top_n=AUCTION_TOP_N):
     """腾讯优先，东财直连/akshare 依次降级；返回 (stocks, source_label)。"""
     last_exc = None
     for label, fn in (
@@ -336,7 +352,7 @@ def fetch_auction_snapshot():
         ("akshare", fetch_auction_snapshot_akshare),
     ):
         try:
-            stocks = fn()
+            stocks = fn(top_n)
             if stocks:
                 print("[fetch] 行情源=%s，%d 只" % (label, len(stocks)), flush=True)
                 return stocks, label
@@ -346,8 +362,8 @@ def fetch_auction_snapshot():
     raise last_exc or RuntimeError("所有行情源均失败")
 
 
-def fetch_auction_snapshot_tencent():
-    """腾讯全市场快照（akshare 封装），取竞价金额前 AUCTION_TOP_N；排除北交所。"""
+def fetch_auction_snapshot_tencent(top_n=AUCTION_TOP_N):
+    """腾讯全市场快照（akshare 封装），取竞价金额前 top_n；排除北交所。"""
     if ak is None:
         raise RuntimeError("akshare 未安装")
     import io
@@ -383,10 +399,10 @@ def fetch_auction_snapshot_tencent():
             "totalCap": (to_float(row.get("zsz")) or 0) * TX_CAP_MULT,
         })
     stocks.sort(key=lambda s: (s["auctionAmount"] or 0), reverse=True)
-    return stocks[:AUCTION_TOP_N]
+    return stocks[:top_n]
 
 
-def _fetch_auction_snapshot_eastmoney():
+def _fetch_auction_snapshot_eastmoney(top_n=AUCTION_TOP_N):
     data = http_json(PUSH2_URL)
     diff = ((data.get("data") or {}).get("diff")) or []
     stocks = []
@@ -420,10 +436,10 @@ def _fetch_auction_snapshot_eastmoney():
             "totalCap": total_cap,            # 元
         })
     stocks.sort(key=lambda s: (s["auctionAmount"] or 0), reverse=True)
-    return stocks[:AUCTION_TOP_N]
+    return stocks[:top_n]
 
 
-def fetch_auction_snapshot_akshare():
+def fetch_auction_snapshot_akshare(top_n=AUCTION_TOP_N):
     """akshare 降级源：先东财全市场，再新浪全市场。"""
     if ak is None:
         raise RuntimeError("akshare 未安装")
@@ -469,7 +485,7 @@ def fetch_auction_snapshot_akshare():
             "totalCap": total_cap,            # 元
         })
     stocks.sort(key=lambda s: (s["auctionAmount"] or 0), reverse=True)
-    return stocks[:AUCTION_TOP_N]
+    return stocks[:top_n]
 
 
 def fetch_yesterday_metric(stock, snapshot_date):
@@ -1852,6 +1868,67 @@ def seal_fetch_loop(enabled=True):
             continue
         time.sleep(max(1, (_hm_time(now, target) - datetime.now()).total_seconds()))
         _run_seal_sample(target)
+
+
+def fetch_auction_top(n=AUCTION_TOP_RANK_N):
+    """抓取竞价额前 N 的榜单（不做衍生计算），按竞价额降序补 rank。
+
+    返回 {"date","records":[{...,"rank","tradeDate","fetchedAt"}],"scanned":n}
+    """
+    now = datetime.now()
+    snapshot, _ = fetch_auction_snapshot(top_n=n)
+    records = []
+    for idx, s in enumerate(snapshot, start=1):
+        rec = dict(s)
+        rec["rank"] = idx
+        rec["tradeDate"] = now.strftime("%Y-%m-%d")
+        rec["fetchedAt"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        records.append(rec)
+    return {
+        "date": now.strftime("%Y-%m-%d"),
+        "records": records,
+        "scanned": n,
+    }
+
+
+def _run_auction_top_sample():
+    try:
+        snap = fetch_auction_top()
+        if not snap["records"]:
+            print("[auction-top] 竞价榜抓取为空，跳过入库", flush=True)
+            return
+        if not db.save_auction_top(snap["records"]):
+            print("[auction-top] 入库失败: %s" % db.last_error(), flush=True)
+        else:
+            print("[auction-top] 竞价额榜单入库（%d 条）" % len(snap["records"]), flush=True)
+    except Exception as exc:
+        print("[auction-top] 抓取失败: %r" % exc, flush=True)
+
+
+def auction_top_fetch_loop(enabled=True):
+    """交易日 9:25-9:30 抓一次竞价额前 N 榜单，独立于竞价快照线程。"""
+    if not enabled:
+        return
+    fetched_date = None
+    attempts = 0
+    while True:
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        if today != fetched_date:
+            attempts = 0
+        if fetched_date == today:
+            time.sleep(sleep_until_next_auction())
+            continue
+        valid, _ = auction_window_status(now)
+        if valid and attempts < AUTO_FETCH_MAX_ATTEMPTS:
+            print("[auction-top] 交易日竞价已结束，开始抓取竞价榜", flush=True)
+            try:
+                _run_auction_top_sample()
+                fetched_date = today
+            except Exception as exc:
+                attempts += 1
+                print("[auction-top] 抓取失败(%d/%d): %r" % (attempts, AUTO_FETCH_MAX_ATTEMPTS, exc), flush=True)
+        time.sleep(AUTO_FETCH_TICK)
 
 
 # 收盘涨幅入库：交易日 15:05 抓一次当日竞价股的最终涨幅
@@ -4446,6 +4523,40 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 self.send_json({"ok": True, "date": date, "rows": rows})
             return
+        if parsed.path == "/api/auction_top/dates":
+            try:
+                self.send_json({"ok": True, "dates": db.list_auction_top_dates()})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": "MySQL 不可用: %s" % exc}, status=502)
+            return
+        if parsed.path == "/api/auction_top":
+            date = (parse_qs(parsed.query).get("date") or [""])[0]
+            if not date:
+                self.send_json({"ok": False, "error": "缺少 date 参数"}, status=400)
+                return
+            try:
+                rows = db.get_auction_top(date)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": "MySQL 不可用: %s" % exc}, status=502)
+                return
+            if not rows:
+                self.send_json({"ok": False, "error": "未找到该日期竞价榜数据: %s" % date}, status=404)
+            else:
+                self.send_json({"ok": True, "date": date, "rows": rows})
+            return
+        if parsed.path == "/api/auction_top/refresh":
+            try:
+                snap = fetch_auction_top()
+                if not snap["records"]:
+                    self.send_json({"ok": False, "error": "竞价榜抓取为空"}, status=502)
+                    return
+                if not db.save_auction_top(snap["records"]):
+                    self.send_json({"ok": False, "error": "入库失败: %s" % db.last_error()}, status=502)
+                else:
+                    self.send_json({"ok": True, "date": snap["date"], "count": len(snap["records"])})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": "抓取失败: %s" % exc}, status=502)
+            return
         if parsed.path == "/api/review/dates":
             try:
                 dates = db.list_review_dates(120)
@@ -4592,6 +4703,7 @@ def main():
         print("[db] MySQL 历史库不可用: %s" % db.last_error(), flush=True)
     threading.Thread(target=auto_fetch_loop, args=(not args.no_auto,), daemon=True).start()
     threading.Thread(target=seal_fetch_loop, args=(not args.no_auto,), daemon=True).start()
+    threading.Thread(target=auction_top_fetch_loop, args=(not args.no_auto,), daemon=True).start()
     threading.Thread(target=close_fetch_loop, args=(not args.no_auto,), daemon=True).start()
     threading.Thread(target=plan_fetch_loop, args=(not args.no_auto,), daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
@@ -4602,6 +4714,7 @@ def main():
         print("[auto] 自动抓取已开启：每个交易日 9:25-9:30", flush=True)
     if not args.no_auto:
         print("[seal] 封单抓取已开启：每个交易日 9:15/9:20/9:25", flush=True)
+        print("[auction-top] 竞价榜抓取已开启：每个交易日 9:25-9:30（竞价额前60名）", flush=True)
         print("[close] 收盘自动任务已开启：每个交易日 15:05（收盘涨幅入库 + 自动生成当日复盘）", flush=True)
         print("[plan] 早盘预案自动生成已开启：每个交易日 8:30", flush=True)
         print("[push] 交易信号推送已开启：竞价抓取完成后推送 Top3（需配置 Server酱）", flush=True)

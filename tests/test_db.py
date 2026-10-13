@@ -333,6 +333,87 @@ class SealQueryTest(unittest.TestCase):
         self.assertEqual(dates[0]["times"], ["09:15", "09:20", "09:25"])
 
 
+def auction_top_record(**overrides):
+    r = {
+        "tradeDate": "2026-08-10", "code": "300059", "name": "东方财富",
+        "industry": "券商", "price": 20.0, "changePct": 9.99,
+        "auctionAmount": 18410392.0, "auctionVolume": 9196.0,
+        "turnover": 1.5, "volumeRatio": 3.2,
+        "floatCap": 1.2e11, "totalCap": 1.3e11,
+        "rank": 1, "fetchedAt": "2026-08-10 09:25:01",
+    }
+    r.update(overrides)
+    return r
+
+
+class SaveAuctionTopTest(unittest.TestCase):
+    def setUp(self):
+        db._available = True
+        db._last_error = ""
+
+    def test_empty_records_not_saved(self):
+        with mock.patch.object(db, "_connect") as connect:
+            self.assertFalse(db.save_auction_top([]))
+            connect.assert_not_called()
+
+    def test_save_uses_upsert(self):
+        fake = FakeConn()
+        with mock.patch.object(db, "_connect", return_value=fake):
+            self.assertTrue(db.save_auction_top([auction_top_record()]))
+        sql = fake.cur.executed[0][0]
+        self.assertIn("INSERT INTO auction_top", sql)
+        self.assertIn("ON DUPLICATE KEY UPDATE", sql)
+        args = fake.cur.executed[0][1]
+        self.assertEqual(args[0][0], "2026-08-10")
+        self.assertEqual(args[0][1], "300059")
+        self.assertTrue(fake.committed)
+
+    def test_db_error_fails_soft(self):
+        with mock.patch.object(db, "_connect", side_effect=RuntimeError("boom")):
+            self.assertFalse(db.save_auction_top([auction_top_record()]))
+        self.assertFalse(db.is_available())
+        self.assertIn("boom", db.last_error())
+
+    def test_none_numeric_mapped(self):
+        fake = FakeConn()
+        rec = auction_top_record(price=None)
+        with mock.patch.object(db, "_connect", return_value=fake):
+            self.assertTrue(db.save_auction_top([rec]))
+        vals = fake.cur.executed[0][1][0]
+        self.assertIsNone(vals[4])  # price 索引位
+
+
+class AuctionTopQueryTest(unittest.TestCase):
+    def _row(self, **overrides):
+        r = {
+            "code": "300059", "name": "东方财富", "industry": "券商",
+            "price": 20.0, "change_pct": 9.99,
+            "auction_amount": 18410392.0, "auction_volume": 9196.0,
+            "turnover": 1.5, "volume_ratio": 3.2,
+            "float_cap": 1.2e11, "total_cap": 1.3e11,
+            "rank": 1,
+            "fetched_at": datetime(2026, 8, 10, 9, 25, 1),
+        }
+        r.update(overrides)
+        return r
+
+    def test_get_auction_top_shape(self):
+        with mock.patch.object(db, "_connect", return_value=FakeConn(rows=[self._row()])):
+            rows = db.get_auction_top("2026-08-10")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["code"], "300059")
+        self.assertEqual(rows[0]["rank"], 1)
+        self.assertEqual(rows[0]["auctionAmount"], 18410392.0)
+        self.assertEqual(rows[0]["fetchedAt"], "2026-08-10 09:25:01")
+
+    def test_list_auction_top_dates_shape(self):
+        row = {"trade_date": date(2026, 8, 10), "cnt": 60}
+        with mock.patch.object(db, "_connect", return_value=FakeConn(rows=[row])):
+            dates = db.list_auction_top_dates()
+        self.assertEqual(dates[0]["date"], "2026-08-10")
+        self.assertEqual(dates[0]["count"], 60)
+
+
 class SaveClosePctTest(unittest.TestCase):
     def setUp(self):
         db._available = True
@@ -359,6 +440,17 @@ class SaveClosePctTest(unittest.TestCase):
         self.assertIn("UPDATE auction_stock SET close_pct", update_sql)
         args = fake.cur.executed[1][1]
         self.assertEqual(args[0], (10.0, None, 7, "600721"))
+        self.assertEqual(args[1], (4.22, None, 7, "300246"))
+        self.assertTrue(fake.committed)
+
+    def test_updates_close_pct_with_price_map(self):
+        fake = FakeConn(rows=[{"id": 7}])
+        pct_map = {"600721": 10.0, "300246": 4.22}
+        price_map = {"600721": 8.88, "300246": None}
+        with mock.patch.object(db, "_connect", return_value=fake):
+            self.assertTrue(db.save_close_pct("2026-08-11", pct_map, price_map=price_map))
+        args = fake.cur.executed[1][1]
+        self.assertEqual(args[0], (10.0, 8.88, 7, "600721"))
         self.assertEqual(args[1], (4.22, None, 7, "300246"))
         self.assertTrue(fake.committed)
 

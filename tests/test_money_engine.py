@@ -72,7 +72,7 @@ class TestMoneyMarket(unittest.TestCase):
 class TestCompute(unittest.TestCase):
     def test_structure(self):
         day = {"date": "2026-09-16", "avgPremium": 3.65, "promoteRate": 0.429,
-               "first2Rate": 0.36, "up": 3888, "down": 1134, "zt": 89, "dt": 4,
+               "first2Rate": 0.36, "up": 3888, "down": 1134, "zt": 89, "dt": 4, "zb": 10,
                "amountChgPct": 14.04}
         res = money_engine.compute(day)
         self.assertEqual(res["date"], "2026-09-16")

@@ -85,6 +85,43 @@ class TestInAuctionWindow(unittest.TestCase):
         self.assertFalse(server._in_auction_window(self._dt(8, 1000)))
 
 
+class TestIsTradingDay(unittest.TestCase):
+    def setUp(self):
+        server._trading_day_cache.clear()
+        server._trading_calendar_cache.clear()
+
+    def _dt(self, day, hm):
+        from datetime import datetime
+        return datetime(2026, 10, day, hm // 100, hm % 100)
+
+    def test_trading_day(self):
+        from unittest import mock
+        with mock.patch.object(server, "_fetch_month_trading_days",
+                               return_value={"2026-10-08", "2026-10-09", "2026-10-12"}) as fetch:
+            self.assertTrue(server.is_trading_day(self._dt(9, 930)))
+            self.assertTrue(server.is_trading_day(self._dt(8, 800)))  # 盘前也是交易日
+        self.assertEqual(fetch.call_count, 1)  # 同月只查一次日历
+
+    def test_holiday(self):
+        # 2026-10-05 周一（国庆休市），日历里没有 → False
+        from unittest import mock
+        with mock.patch.object(server, "_fetch_month_trading_days",
+                               return_value={"2026-10-08", "2026-10-09"}):
+            self.assertFalse(server.is_trading_day(self._dt(5, 930)))
+
+    def test_calendar_unavailable_falls_back_to_true(self):
+        # 接口不可用 → 按工作日兜底 True，避免漏抓交易日数据
+        from unittest import mock
+        with mock.patch.object(server, "_fetch_month_trading_days", return_value=None):
+            self.assertTrue(server.is_trading_day(self._dt(9, 930)))
+
+    def test_weekend_short_circuits(self):
+        from unittest import mock
+        with mock.patch.object(server, "_fetch_month_trading_days") as fetch:
+            self.assertFalse(server.is_trading_day(self._dt(10, 930)))  # 周六
+        self.assertFalse(fetch.called)
+
+
 class TestParsePaging(unittest.TestCase):
     def test_defaults(self):
         self.assertEqual(server._parse_paging({}), (1, 30))
@@ -119,6 +156,36 @@ class TestBuildHorsesForDate(unittest.TestCase):
             result = server.build_horses_for_date("2026-08-10")
         self.assertEqual(result["date"], "2026-08-10")
         self.assertTrue(result["stale"])
+
+
+class TestFetchAuctionTop(unittest.TestCase):
+    def test_adds_rank_and_metadata(self):
+        from unittest import mock
+        from datetime import datetime
+        stocks = [{"code": "600000", "name": "A", "auctionAmount": 500.0},
+                  {"code": "000001", "name": "B", "auctionAmount": 300.0}]
+        with mock.patch.object(server, "fetch_auction_snapshot", return_value=(stocks, "腾讯")):
+            result = server.fetch_auction_top(n=2)
+        self.assertEqual(result["scanned"], 2)
+        self.assertEqual(len(result["records"]), 2)
+        self.assertEqual(result["records"][0]["rank"], 1)
+        self.assertEqual(result["records"][1]["rank"], 2)
+        self.assertEqual(result["records"][0]["tradeDate"], datetime.now().strftime("%Y-%m-%d"))
+        self.assertIn("fetchedAt", result["records"][0])
+
+    def test_fetch_snapshot_passes_top_n(self):
+        from unittest import mock
+        calls = []
+
+        def fake_tencent(top_n):
+            calls.append(top_n)
+            return [{"code": "600000", "name": "A", "auctionAmount": 500.0}]
+
+        with mock.patch.object(server, "fetch_auction_snapshot_tencent", side_effect=fake_tencent):
+            stocks, label = server.fetch_auction_snapshot(top_n=60)
+        self.assertEqual(calls[0], 60)
+        self.assertEqual(len(stocks), 1)
+        self.assertEqual(label, "腾讯")
 
 
 if __name__ == "__main__":

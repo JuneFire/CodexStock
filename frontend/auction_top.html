@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>竞价榜 · 量化选股器</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="auction_top.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <a class="btn btn-ghost btn-sm" href="index.html" type="button">
+          <i data-lucide="arrow-left" aria-hidden="true"></i><span>返回</span>
+        </a>
+        <span class="brand-mark"><i data-lucide="list-ordered" aria-hidden="true"></i></span>
+        <div class="brand-text">
+          <h1>竞价榜</h1>
+          <p id="topStatus">—</p>
+        </div>
+      </div>
+      <div class="topbar-tools">
+        <button id="btnPrevDay" class="btn btn-ghost" type="button" data-tooltip="前一天"><i data-lucide="chevron-left" aria-hidden="true"></i></button>
+        <span id="topDate" class="panel-meta">—</span>
+        <button id="btnNextDay" class="btn btn-ghost" type="button" data-tooltip="后一天"><i data-lucide="chevron-right" aria-hidden="true"></i></button>
+        <a class="btn" href="history.html" data-tooltip="MySQL 历史竞价数据"><i data-lucide="history" aria-hidden="true"></i><span>历史</span></a>
+        <a class="btn" href="plan.html" data-tooltip="每日早盘预案"><i data-lucide="sunrise" aria-hidden="true"></i><span>预案</span></a>
+        <a class="btn" href="review.html" data-tooltip="情绪周期复盘"><i data-lucide="clipboard-list" aria-hidden="true"></i><span>复盘</span></a>
+      </div>
+    </header>
+
+    <main class="main env-main">
+      <div id="topBanner" class="env-banner" hidden></div>
+
+      <section class="panel env-panel">
+        <div class="panel-head">
+          <h2>竞价成交额 Top60</h2>
+          <span id="topMeta" class="panel-meta">—</span>
+        </div>
+        <div class="table-responsive">
+          <table class="table" id="topTable">
+            <thead>
+              <tr>
+                <th class="th-star" aria-label="排名"></th>
+                <th>代码</th>
+                <th>名称 / 行业</th>
+                <th>竞价价</th>
+                <th>竞价涨幅</th>
+                <th>竞价成交额</th>
+                <th>竞价量</th>
+                <th>量比</th>
+                <th>竞价换手</th>
+                <th>流通市值</th>
+              </tr>
+            </thead>
+            <tbody id="topBody"></tbody>
+          </table>
+        </div>
+        <div id="topEmpty" class="horse-empty" hidden>暂无竞价榜数据</div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

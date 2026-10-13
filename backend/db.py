@@ -121,6 +121,29 @@ SCHEMA = [
         KEY idx_date_seal (trade_date, seal_amount)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    """
+    CREATE TABLE IF NOT EXISTS auction_top (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        trade_date DATE NOT NULL,
+        code VARCHAR(10) NOT NULL,
+        name VARCHAR(64) NOT NULL DEFAULT '',
+        industry VARCHAR(64) NOT NULL DEFAULT '',
+        price DECIMAL(12,3) NULL,
+        change_pct DECIMAL(8,3) NULL,
+        auction_amount DECIMAL(20,2) NULL,
+        auction_volume DECIMAL(20,2) NULL,
+        turnover DECIMAL(10,3) NULL,
+        volume_ratio DECIMAL(10,3) NULL,
+        float_cap DECIMAL(20,2) NULL,
+        total_cap DECIMAL(20,2) NULL,
+        `rank` INT NULL,
+        fetched_at DATETIME NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_date_code (trade_date, code),
+        KEY idx_date_rank (trade_date, `rank`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 ]
 
 REVIEW_UPSERT_SQL = """
@@ -790,12 +813,14 @@ def load_daily_baseline(date):
     return {r["code"]: {"amount": _num(r["amount"]), "turnover": _num(r["turnover"]), "close": _num(r["close"])} for r in rows}
 
 
-def save_close_pct(date, pct_map):
-    """把 {code: 收盘涨幅%} 批量更新到当日 auction_stock 行。MySQL 不可用返回 False。"""
+def save_close_pct(date, pct_map, price_map=None):
+    """把 {code: 收盘涨幅%} 批量更新到当日 auction_stock 行；price_map={code: 收盘价}
+    可选，传入时一并写入 close_price（否则该列保持 NULL）。MySQL 不可用返回 False。"""
     global _available, _last_error
     if not pct_map:
         _last_error = "收盘数据为空"
         return False
+    price_map = price_map or {}
     with _lock:
         try:
             conn = _connect()
@@ -813,7 +838,8 @@ def save_close_pct(date, pct_map):
                         pct_val = _num(pct)
                         if pct_val is None:
                             continue
-                        rows.append((pct_val, None, day_id, code))
+                        price_val = _num(price_map.get(code))
+                        rows.append((pct_val, price_val, day_id, code))
                     if rows:
                         cur.executemany(CLOSE_PCT_SQL, rows)
                 conn.commit()
@@ -885,3 +911,122 @@ def list_seal_dates(limit=120):
         }
         for r in rows
     ]
+
+
+# ---------- 竞价成交额 TopN 榜单 ----------
+
+AUCTION_TOP_UPSERT_SQL = """
+INSERT INTO auction_top (
+    trade_date, code, name, industry, price, change_pct,
+    auction_amount, auction_volume, turnover, volume_ratio, float_cap, total_cap, `rank`, fetched_at
+) VALUES (
+    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+)
+ON DUPLICATE KEY UPDATE
+    name = VALUES(name),
+    industry = VALUES(industry),
+    price = VALUES(price),
+    change_pct = VALUES(change_pct),
+    auction_amount = VALUES(auction_amount),
+    auction_volume = VALUES(auction_volume),
+    turnover = VALUES(turnover),
+    volume_ratio = VALUES(volume_ratio),
+    float_cap = VALUES(float_cap),
+    total_cap = VALUES(total_cap),
+    `rank` = VALUES(`rank`),
+    fetched_at = VALUES(fetched_at)
+"""
+
+
+def _auction_top_values(r):
+    return (
+        r["tradeDate"],
+        str(r.get("code") or ""),
+        str(r.get("name") or ""),
+        str(r.get("industry") or ""),
+        _num(r.get("price")),
+        _num(r.get("changePct")),
+        _num(r.get("auctionAmount")),
+        _num(r.get("auctionVolume")),
+        _num(r.get("turnover")),
+        _num(r.get("volumeRatio")),
+        _num(r.get("floatCap")),
+        _num(r.get("totalCap")),
+        r.get("rank"),
+        r.get("fetchedAt"),
+    )
+
+
+def save_auction_top(records):
+    """批量 upsert 竞价榜记录。MySQL 不可用返回 False 不抛。"""
+    global _available, _last_error
+    if not records:
+        _last_error = "竞价榜记录为空"
+        return False
+    with _lock:
+        try:
+            conn = _connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.executemany(AUCTION_TOP_UPSERT_SQL, [_auction_top_values(r) for r in records])
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+            _available = True
+            _last_error = ""
+            return True
+        except Exception as exc:
+            _available = False
+            _last_error = str(exc)
+            return False
+
+
+def _auction_top_from_row(r):
+    return {
+        "code": r["code"],
+        "name": r["name"],
+        "industry": r["industry"],
+        "price": _num(r["price"]),
+        "changePct": _num(r["change_pct"]),
+        "auctionAmount": _num(r["auction_amount"]),
+        "auctionVolume": _num(r["auction_volume"]),
+        "turnover": _num(r["turnover"]),
+        "volumeRatio": _num(r["volume_ratio"]),
+        "floatCap": _num(r["float_cap"]),
+        "totalCap": _num(r["total_cap"]),
+        "rank": r["rank"],
+        "fetchedAt": _datetime_str(r["fetched_at"]),
+    }
+
+
+def get_auction_top(date):
+    """某日竞价额榜单，按 rank 升序。"""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM auction_top WHERE trade_date = %s ORDER BY `rank` ASC",
+                (date,),
+            )
+            rows = cur.fetchall()
+    return [_auction_top_from_row(r) for r in rows]
+
+
+def list_auction_top_dates(limit=120):
+    """有竞价榜数据的日期列表（倒序）。"""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT trade_date, COUNT(*) AS cnt
+                FROM auction_top
+                GROUP BY trade_date
+                ORDER BY trade_date DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return [{"date": _date_str(r["trade_date"]), "count": int(r["cnt"] or 0)} for r in rows]
