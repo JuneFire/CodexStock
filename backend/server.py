@@ -1896,6 +1896,7 @@ def fetch_auction_top(n=AUCTION_TOP_RANK_N):
 
     量比列：腾讯源在竞价窗口返回的 lb 恒为 0（量比需盘中累计时间才能算），
     故改为"竞价量比" = 今日竞价量 / 昨日竞价量（昨日取自竞价榜归档），缺昨日数据则为 null。
+    封单额列：对榜单股票取腾讯买一量×买一价（fetch_seal_quotes，与首页 _build_snapshot 同源），无买一则为 null。
     返回 {"date","records":[{...,"rank","tradeDate","fetchedAt"}],"scanned":n}
     """
     now = datetime.now()
@@ -1914,12 +1915,16 @@ def fetch_auction_top(n=AUCTION_TOP_RANK_N):
             code, vol = r.get("code"), r.get("auctionVolume")
             if code and vol:
                 prev_vol_map[code] = vol
+    # 封单额：对榜单股票取腾讯买一量×买一价（与首页封单同源）
+    seal_quotes = fetch_seal_quotes([s.get("code") for s in snapshot if s.get("code")]) or {}
     records = []
     for idx, s in enumerate(snapshot, start=1):
         rec = dict(s)
         vol = s.get("auctionVolume")
         pv = prev_vol_map.get(s.get("code"))
         rec["volumeRatio"] = round(vol / pv, 2) if (vol and pv) else None
+        q = seal_quotes.get(s.get("code")) or {}
+        rec["sealAmount"] = q.get("sealAmount")
         rec["rank"] = idx
         rec["tradeDate"] = today
         rec["fetchedAt"] = now.strftime("%Y-%m-%d %H:%M:%S")

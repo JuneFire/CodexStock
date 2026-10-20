@@ -2,6 +2,7 @@
   'use strict';
 
   const $ = (sel, root) => (root || document).querySelector(sel);
+  const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({
@@ -54,7 +55,24 @@
     toast: $('#toast')
   };
 
-  const state = { date: '', dates: [], rows: [], sort: { key: 'auctionAmount', dir: 'desc' } };
+  const LS_COLS = 'auction-top-cols-v1';
+  const DEFAULT_COL_ORDER = ['rank', 'code', 'name', 'price', 'changePct', 'auctionAmount', 'auctionVolume', 'sealAmount', 'volumeRatio', 'turnover', 'floatCap'];
+
+  function loadColOrder() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(LS_COLS) || '[]');
+      if (Array.isArray(arr) && arr.length === DEFAULT_COL_ORDER.length && DEFAULT_COL_ORDER.every(k => arr.includes(k))) {
+        return arr;
+      }
+    } catch (e) { /* ignore */ }
+    return DEFAULT_COL_ORDER.slice();
+  }
+
+  function saveColOrder(order) {
+    try { localStorage.setItem(LS_COLS, JSON.stringify(order)); } catch (e) { /* ignore */ }
+  }
+
+  const state = { date: '', dates: [], rows: [], colOrder: loadColOrder(), sort: { key: 'auctionAmount', dir: 'desc' } };
 
   async function loadDates() {
     try {
@@ -95,27 +113,39 @@
     return '';
   }
 
-  function rowHtml(r, i) {
-    const pct = r.changePct;
-    return `
-      <tr>
-        <td class="num">${r.rank || i + 1}</td>
-        <td class="stock-code"><a class="stock-link" href="${emUrl(r.code)}" target="_blank" rel="noopener">${esc(r.code)}</a></td>
-        <td>${codeLink(r.code, r.name)} <span class="stock-sector">${esc(r.industry || '')}</span></td>
-        <td class="num">${fmtNum(r.price, 2)}</td>
-        <td class="num ${pctCls(pct)}">${fmtNum(pct, 2)}%</td>
-        <td class="num">${fmtAmount(r.auctionAmount)}</td>
-        <td class="num">${fmtNum(r.auctionVolume, 0)}</td>
-        <td class="num">${r.volumeRatio != null ? fmtNum(r.volumeRatio, 1) + '×' : '—'}</td>
-        <td class="num">${r.turnover != null ? fmtNum(r.turnover, 2) + '%' : '—'}</td>
-        <td class="num">${fmtAmount(r.floatCap)}</td>
-      </tr>`;
+  function cellHtml(r, key, i) {
+    switch (key) {
+      case 'rank':
+        return `<td class="num">${r.rank || i + 1}</td>`;
+      case 'code':
+        return `<td class="stock-code"><a class="stock-link" href="${emUrl(r.code)}" target="_blank" rel="noopener">${esc(r.code)}</a></td>`;
+      case 'name':
+        return `<td>${codeLink(r.code, r.name)} <span class="stock-sector">${esc(r.industry || '')}</span></td>`;
+      case 'price':
+        return `<td class="num">${fmtNum(r.price, 2)}</td>`;
+      case 'changePct':
+        return `<td class="num ${pctCls(r.changePct)}">${fmtNum(r.changePct, 2)}%</td>`;
+      case 'auctionAmount':
+        return `<td class="num">${fmtAmount(r.auctionAmount)}</td>`;
+      case 'auctionVolume':
+        return `<td class="num">${fmtNum(r.auctionVolume, 0)}</td>`;
+      case 'sealAmount':
+        return `<td class="num">${r.sealAmount != null ? fmtAmount(r.sealAmount) : '—'}</td>`;
+      case 'volumeRatio':
+        return `<td class="num">${r.volumeRatio != null ? fmtNum(r.volumeRatio, 1) + '×' : '—'}</td>`;
+      case 'turnover':
+        return `<td class="num">${r.turnover != null ? fmtNum(r.turnover, 2) + '%' : '—'}</td>`;
+      case 'floatCap':
+        return `<td class="num">${fmtAmount(r.floatCap)}</td>`;
+      default:
+        return '<td></td>';
+    }
   }
 
   const SORT_LABELS = {
     code: '代码', name: '名称', price: '竞价价', changePct: '竞价涨幅',
-    auctionAmount: '竞价成交额', auctionVolume: '竞价量', volumeRatio: '竞价量比',
-    turnover: '竞价换手', floatCap: '流通市值'
+    auctionAmount: '竞价成交额', auctionVolume: '竞价量', sealAmount: '封单额',
+    volumeRatio: '竞价量比', turnover: '竞价换手', floatCap: '流通市值'
   };
 
   function sortRows(list) {
@@ -146,6 +176,61 @@
     });
   }
 
+  function applyColOrder() {
+    const theadRow = $('thead tr', els.topTable);
+    const map = {};
+    $$('th[data-key]', theadRow).forEach(th => { map[th.getAttribute('data-key')] = th; });
+    state.colOrder.forEach(key => {
+      const th = map[key];
+      if (th) theadRow.appendChild(th);
+    });
+  }
+
+  function initColumnDrag() {
+    const theadRow = $('thead tr', els.topTable);
+    let dragKey = null;
+
+    $$('th[data-key]', theadRow).forEach(th => th.setAttribute('draggable', 'true'));
+
+    theadRow.addEventListener('dragstart', e => {
+      const th = e.target.closest('th[data-key]');
+      if (!th) return;
+      dragKey = th.getAttribute('data-key');
+      th.classList.add('is-dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        try { e.dataTransfer.setData('text/plain', dragKey); } catch (err) { /* ignore */ }
+      }
+    });
+
+    theadRow.addEventListener('dragend', () => {
+      $$('th[data-key]', theadRow).forEach(t => t.classList.remove('is-dragging', 'is-drop-target'));
+      dragKey = null;
+    });
+
+    theadRow.addEventListener('dragover', e => {
+      const th = e.target.closest('th[data-key]');
+      if (!th || !dragKey) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      $$('th[data-key]', theadRow).forEach(t => t.classList.toggle('is-drop-target', t === th));
+    });
+
+    theadRow.addEventListener('drop', e => {
+      const th = e.target.closest('th[data-key]');
+      if (!th || !dragKey || th.getAttribute('data-key') === dragKey) return;
+      e.preventDefault();
+      const dragged = $('th[data-key="' + dragKey + '"]', theadRow);
+      if (!dragged) return;
+      const rect = th.getBoundingClientRect();
+      if (e.clientX > rect.left + rect.width / 2) th.after(dragged);
+      else th.before(dragged);
+      state.colOrder = $$('th[data-key]', theadRow).map(t => t.getAttribute('data-key'));
+      saveColOrder(state.colOrder);
+      render();
+    });
+  }
+
   function render() {
     const rows = sortRows(state.rows);
     const date = state.date;
@@ -153,7 +238,7 @@
     els.topStatus.textContent = date + ' · ' + rows.length + ' 只';
     els.topMeta.textContent = '前 ' + rows.length + ' 名 · 按' + (SORT_LABELS[state.sort.key] || '') + (state.sort.dir === 'desc' ? '降序' : '升序');
     els.topEmpty.hidden = rows.length > 0;
-    els.topBody.innerHTML = rows.map(rowHtml).join('');
+    els.topBody.innerHTML = rows.map((r, i) => '<tr>' + state.colOrder.map(k => cellHtml(r, k, i)).join('') + '</tr>').join('');
     updateSortIcons();
     refreshIcons();
   }
@@ -179,6 +264,8 @@
 
   async function init() {
     bindEvents();
+    applyColOrder();
+    initColumnDrag();
     await loadDates();
     const latest = state.dates[0] || new Date().toISOString().slice(0, 10);
     state.date = latest;
