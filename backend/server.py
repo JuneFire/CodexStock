@@ -709,31 +709,36 @@ def fetch_indices_akshare():
 
 
 def build_sector_map():
-    """从新浪行业板块构建 {6位代码: 行业} 映射，first-wins，写盘缓存。"""
+    """从新浪行业板块构建 {6位代码: 行业} 映射，first-wins，写盘缓存。
+
+    依次抓取"新浪行业"(49板块)与新浪"行业"(84板块)两套分类并合并：
+    前者为历史口径（保持既有页面行业名不变），后者补齐前者未覆盖的个股
+    （含创业板/科创板部分标的，如 300750 等）。"""
     if ak is None:
         return {}
     import io
     import contextlib
     mapping = {}
-    try:
-        with contextlib.redirect_stderr(io.StringIO()):
-            sectors = ak.stock_sector_spot(indicator="新浪行业")
-        for _, sec in sectors.iterrows():
-            label = str(sec.get("label") or "").strip()
-            if not label:
-                continue
-            industry = str(sec.get("板块") or label).strip()
-            try:
-                with contextlib.redirect_stderr(io.StringIO()):
-                    detail = ak.stock_sector_detail(sector=label)
-                for _, r in detail.iterrows():
-                    code = str(r.get("code") or "").zfill(6)
-                    if code:
-                        mapping.setdefault(code, industry)
-            except Exception as exc:
-                print("[sector] %s 成分获取失败: %r" % (label, exc), flush=True)
-    except Exception as exc:
-        print("[sector] 新浪板块构建失败: %r" % exc, flush=True)
+    for indicator in ("新浪行业", "行业"):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                sectors = ak.stock_sector_spot(indicator=indicator)
+            for _, sec in sectors.iterrows():
+                label = str(sec.get("label") or "").strip()
+                if not label:
+                    continue
+                industry = str(sec.get("板块") or label).strip()
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        detail = ak.stock_sector_detail(sector=label)
+                    for _, r in detail.iterrows():
+                        code = str(r.get("code") or "").zfill(6)
+                        if code:
+                            mapping.setdefault(code, industry)
+                except Exception as exc:
+                    print("[sector] %s 成分获取失败: %r" % (label, exc), flush=True)
+        except Exception as exc:
+            print("[sector] %s 板块构建失败: %r" % (indicator, exc), flush=True)
     if mapping:
         try:
             with _lock:
@@ -1872,21 +1877,40 @@ def seal_fetch_loop(enabled=True):
 
 
 def fetch_auction_top(n=AUCTION_TOP_RANK_N):
-    """抓取竞价额前 N 的榜单（不做衍生计算），按竞价额降序补 rank。
+    """抓取竞价额前 N 的榜单，按竞价额降序补 rank。
 
+    量比列：腾讯源在竞价窗口返回的 lb 恒为 0（量比需盘中累计时间才能算），
+    故改为"竞价量比" = 今日竞价量 / 昨日竞价量（昨日取自竞价榜归档），缺昨日数据则为 null。
     返回 {"date","records":[{...,"rank","tradeDate","fetchedAt"}],"scanned":n}
     """
     now = datetime.now()
     snapshot, _ = fetch_auction_snapshot(top_n=n)
+    # 板块补齐：腾讯源行业恒为"其他"，用新浪行业映射补（与 _build_snapshot 一致）
+    sector_map = load_sector_map()
+    for s in snapshot:
+        if not s.get("industry") or s["industry"] in ("其他", ""):
+            s["industry"] = sector_map.get(s["code"], "其他")
+    # 昨日竞价量（算"竞价量比"用），取自竞价榜文件归档
+    today = now.strftime("%Y-%m-%d")
+    prev_vol_map = {}
+    prev_date = _prev_data_date(AUCTION_TOP_DIR, today)
+    if prev_date:
+        for r in (_auction_top_json_day(prev_date) or []):
+            code, vol = r.get("code"), r.get("auctionVolume")
+            if code and vol:
+                prev_vol_map[code] = vol
     records = []
     for idx, s in enumerate(snapshot, start=1):
         rec = dict(s)
+        vol = s.get("auctionVolume")
+        pv = prev_vol_map.get(s.get("code"))
+        rec["volumeRatio"] = round(vol / pv, 2) if (vol and pv) else None
         rec["rank"] = idx
-        rec["tradeDate"] = now.strftime("%Y-%m-%d")
+        rec["tradeDate"] = today
         rec["fetchedAt"] = now.strftime("%Y-%m-%d %H:%M:%S")
         records.append(rec)
     return {
-        "date": now.strftime("%Y-%m-%d"),
+        "date": today,
         "records": records,
         "scanned": n,
     }
@@ -4607,6 +4631,13 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/auction_top/refresh":
             try:
                 snap = fetch_auction_top()
+                # 竞价窗口校验：窗口外（盘中/盘后）抓到的成交额为全天累计值，
+                # 落盘会污染"竞价成交额"归档，故仅预览、不保存（与竞价页规则一致）
+                in_window = _in_auction_window(datetime.now()) or AUTO_ANYTIME
+                if not in_window:
+                    self.send_json({"ok": True, "date": snap["date"], "count": len(snap["records"]),
+                                    "preview": True, "warning": "非竞价窗口（9:25-9:30），结果仅预览、未保存"})
+                    return
                 ok, msg = save_auction_top_file(snap)
                 if not ok:
                     self.send_json({"ok": False, "error": msg}, status=502)

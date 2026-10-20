@@ -47,13 +47,14 @@
     topBanner: $('#topBanner'),
     topMeta: $('#topMeta'),
     topBody: $('#topBody'),
+    topTable: $('#topTable'),
     topEmpty: $('#topEmpty'),
     btnPrevDay: $('#btnPrevDay'),
     btnNextDay: $('#btnNextDay'),
     toast: $('#toast')
   };
 
-  const state = { date: '', dates: [], rows: [] };
+  const state = { date: '', dates: [], rows: [], sort: { key: 'auctionAmount', dir: 'desc' } };
 
   async function loadDates() {
     try {
@@ -105,24 +106,67 @@
         <td class="num ${pctCls(pct)}">${fmtNum(pct, 2)}%</td>
         <td class="num">${fmtAmount(r.auctionAmount)}</td>
         <td class="num">${fmtNum(r.auctionVolume, 0)}</td>
-        <td class="num">${fmtNum(r.volumeRatio, 1)}</td>
+        <td class="num">${r.volumeRatio != null ? fmtNum(r.volumeRatio, 1) + '×' : '—'}</td>
         <td class="num">${r.turnover != null ? fmtNum(r.turnover, 2) + '%' : '—'}</td>
         <td class="num">${fmtAmount(r.floatCap)}</td>
       </tr>`;
   }
 
+  const SORT_LABELS = {
+    code: '代码', name: '名称', price: '竞价价', changePct: '竞价涨幅',
+    auctionAmount: '竞价成交额', auctionVolume: '竞价量', volumeRatio: '竞价量比',
+    turnover: '竞价换手', floatCap: '流通市值'
+  };
+
+  function sortRows(list) {
+    const { key, dir } = state.sort;
+    const sign = dir === 'desc' ? -1 : 1;
+    return [...list].sort((a, b) => {
+      let av = a[key];
+      let bv = b[key];
+      if (Array.isArray(av)) av = av.join('|');
+      if (Array.isArray(bv)) bv = bv.join('|');
+      if (typeof av === 'string' || typeof bv === 'string') {
+        return String(av || '').localeCompare(String(bv || ''), 'zh') * sign;
+      }
+      const an = Number(av);
+      const bn = Number(bv);
+      const avv = Number.isFinite(an) ? an : -Infinity;
+      const bvv = Number.isFinite(bn) ? bn : -Infinity;
+      return (avv - bvv) * sign;
+    });
+  }
+
+  function updateSortIcons() {
+    els.topTable.querySelectorAll('th.sortable').forEach(th => {
+      const key = th.getAttribute('data-key');
+      const arrow = (key === state.sort.key) ? (state.sort.dir === 'desc' ? '↓' : '↑') : '';
+      const icon = th.querySelector('.sort-icon');
+      if (icon) icon.textContent = arrow;
+    });
+  }
+
   function render() {
-    const rows = state.rows;
+    const rows = sortRows(state.rows);
     const date = state.date;
     els.topDate.textContent = date;
     els.topStatus.textContent = date + ' · ' + rows.length + ' 只';
-    els.topMeta.textContent = '前 ' + rows.length + ' 名 · 按竞价成交额降序';
+    els.topMeta.textContent = '前 ' + rows.length + ' 名 · 按' + (SORT_LABELS[state.sort.key] || '') + (state.sort.dir === 'desc' ? '降序' : '升序');
     els.topEmpty.hidden = rows.length > 0;
     els.topBody.innerHTML = rows.map(rowHtml).join('');
+    updateSortIcons();
     refreshIcons();
   }
 
   function bindEvents() {
+    els.topTable.addEventListener('click', (e) => {
+      const th = e.target.closest('th.sortable');
+      if (!th) return;
+      const key = th.getAttribute('data-key');
+      if (state.sort.key === key) state.sort.dir = state.sort.dir === 'desc' ? 'asc' : 'desc';
+      else state.sort = { key, dir: key === 'code' ? 'asc' : 'desc' };
+      render();
+    });
     els.btnPrevDay.addEventListener('click', () => {
       const i = state.dates.indexOf(state.date);
       if (i >= 0 && i < state.dates.length - 1) loadTop(state.dates[i + 1]);
