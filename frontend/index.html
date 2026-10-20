@@ -106,7 +106,7 @@
             <table class="table" id="stockTable">
               <thead>
                 <tr>
-                  <th class="th-star" aria-label="自选"></th>
+                  <th class="th-star" data-key="star" aria-label="自选"></th>
                   <th class="sortable" data-key="code">代码</th>
                   <th class="sortable" data-key="name">名称 / 板块</th>
                   <th class="sortable col-prevlb" data-key="prevLb" data-tooltip="昨日涨停连板数（0=昨日未涨停）">昨连板</th>
@@ -122,7 +122,7 @@
                   <th class="sortable col-market" data-key="floatCap">流通市值</th>
                   <th class="sortable" data-key="score">超预期分</th>
                   <th class="sortable" data-key="tags">状态</th>
-                  <th>原因</th>
+                  <th data-key="reason">原因</th>
                 </tr>
               </thead>
               <tbody id="stockBody"></tbody>

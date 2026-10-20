@@ -14,6 +14,17 @@
     })[ch]);
   }
 
+  // 东财个股页链接：6 开头沪市，4/8 开头北交所，其余深市
+  function emUrl(code) {
+    const c = String(code || '').padStart(6, '0');
+    const pre = c.startsWith('6') ? 'sh' : (c.startsWith('4') || c.startsWith('8') ? 'bj' : 'sz');
+    return 'https://quote.eastmoney.com/' + pre + c + '.html';
+  }
+
+  function stockLink(code, name) {
+    return `<a class="stock-link" href="${emUrl(code)}" target="_blank" rel="noopener">${esc(name || code)}</a>`;
+  }
+
   function fmtAmountYuan(v) {
     if (v == null || !Number.isFinite(Number(v))) return '—';
     const n = Number(v);
@@ -300,6 +311,24 @@
     } catch (e) { /* ignore */ }
   }
 
+  // ---------- 列顺序持久化 ----------
+  const LS_COLS = 'auction-screener-cols-v1';
+  const DEFAULT_COL_ORDER = ['star', 'code', 'name', 'prevLb', 'price', 'changePct', 'currentPct', 'auctionAmount', 'sealAmount', 'yesterdayAmount', 'prevAuctionAmount', 'amountStrength', 'auctionTurnover', 'floatCap', 'score', 'tags', 'reason'];
+
+  function loadColOrder() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(LS_COLS) || '[]');
+      if (Array.isArray(arr) && arr.length === DEFAULT_COL_ORDER.length && DEFAULT_COL_ORDER.every(k => arr.includes(k))) {
+        return arr;
+      }
+    } catch (e) { /* ignore */ }
+    return DEFAULT_COL_ORDER.slice();
+  }
+
+  function saveColOrder(order) {
+    try { localStorage.setItem(LS_COLS, JSON.stringify(order)); } catch (e) { /* ignore */ }
+  }
+
   const state = {
     stocks: [],
     market: null,
@@ -313,6 +342,7 @@
     sectors: [],
     watchOnly: false,
     watchlist: loadWatchlist(),
+    colOrder: loadColOrder(),
     sort: { key: 'score', dir: 'desc' },
     realtime: {},        // code -> 当前涨幅%
     realtimeTime: '',
@@ -342,6 +372,7 @@
     watchOnly: $('#watchOnly'),
     resultCount: $('#resultCount'),
     stockBody: $('#stockBody'),
+    stockTable: $('#stockTable'),
     emptyState: $('#emptyState'),
     detailPanel: $('#detailPanel'),
     detailContent: $('#detailContent'),
@@ -553,6 +584,102 @@
     `;
   }
 
+  function cellHtml(s, key, ctx) {
+    switch (key) {
+      case 'star':
+        return `<td><button class="star-btn ${ctx.watched ? 'is-active' : ''}" data-action="watch" data-code="${esc(s.code)}" aria-label="${ctx.watched ? '取消自选' : '加入自选'}"><i data-lucide="star" aria-hidden="true"></i></button></td>`;
+      case 'code':
+        return `<td class="stock-code">${stockLink(s.code, s.code)}</td>`;
+      case 'name':
+        return `<td><span class="stock-name">${stockLink(s.code, s.name)}${ctx.grab ? '<span class="grab-badge" title="竞价抢筹">抢筹</span>' : ''}${ctx.dbl ? `<span class="grab-badge dbl-badge" title="今日竞价额 ≥ 昨日竞价额 ${AUCTION_DOUBLE} 倍">竞价翻倍</span>` : ''}</span><span class="stock-sector">${esc(s.industry)}</span></td>`;
+      case 'prevLb':
+        return `<td class="num col-prevlb ${s.prevLb >= 2 ? 'lb-high' : s.prevLb === 1 ? 'lb-one' : ''}">${s.prevLb >= 1 ? (s.prevLb + '板') : '—'}</td>`;
+      case 'price':
+        return `<td class="num">${fmtNum(s.price, 2)}</td>`;
+      case 'changePct':
+        return `<td class="num ${colorCls(s.changePct)}">${fmtPct(s.changePct)}</td>`;
+      case 'currentPct':
+        return `<td class="num col-realtime ${rtCls(state.realtime[s.code])}">${state.realtime[s.code] != null ? fmtPct(state.realtime[s.code]) : '—'}</td>`;
+      case 'auctionAmount':
+        return `<td class="num col-amount amount-strong">${fmtAmountYuan(s.auctionAmount)}</td>`;
+      case 'sealAmount':
+        return `<td class="num col-seal ${s.sealAmount ? 'seal-strong' : 'amount-dim'}">${s.sealAmount ? fmtAmountYuan(s.sealAmount) : '—'}</td>`;
+      case 'yesterdayAmount':
+        return `<td class="num col-yamount amount-dim">${fmtAmountYuan(s.yesterdayAmount)}</td>`;
+      case 'prevAuctionAmount':
+        return `<td class="num col-prevAmount">${ctx.prevAmt}</td>`;
+      case 'amountStrength':
+        return `<td class="num col-strength ${levelCls(s.amountStrength, 100, 30)}">${fmtNum(s.amountStrength, 1)}</td>`;
+      case 'auctionTurnover':
+        return `<td class="num col-auctionTurnover ${levelCls(s.auctionTurnover, 1.5, 0.8)}">${fmtNum(s.auctionTurnover, 2)}%</td>`;
+      case 'floatCap':
+        return `<td class="num col-market">${fmtYi(s.floatCap)}</td>`;
+      case 'score':
+        return `<td><div class="score-cell"><span class="score-track"><span class="score-fill ${s.score >= 80 ? 'high' : ''}" style="width:${clamp(s.score || 0, 0, 100)}%"></span></span><span class="num ${levelCls(s.score, 80, 60)}">${fmtNum(s.score, 1)}</span></div></td>`;
+      case 'tags':
+        return `<td><div class="tag-group">${ctx.tags.map(t => `<span class="tag ${TAG_CLASS[t] || 'tag'}">${esc(t)}</span>`).join('')}</div></td>`;
+      case 'reason':
+        return `<td class="col-reason">${esc(reasonOf(s)) || '<span class="muted">—</span>'}</td>`;
+      default:
+        return '<td></td>';
+    }
+  }
+
+  function applyColOrder() {
+    const theadRow = $('thead tr', els.stockTable);
+    const map = {};
+    $$('th[data-key]', theadRow).forEach(th => { map[th.getAttribute('data-key')] = th; });
+    state.colOrder.forEach(key => {
+      const th = map[key];
+      if (th) theadRow.appendChild(th);
+    });
+  }
+
+  function initColumnDrag() {
+    const theadRow = $('thead tr', els.stockTable);
+    let dragKey = null;
+
+    $$('th[data-key]', theadRow).forEach(th => th.setAttribute('draggable', 'true'));
+
+    theadRow.addEventListener('dragstart', e => {
+      const th = e.target.closest('th[data-key]');
+      if (!th) return;
+      dragKey = th.getAttribute('data-key');
+      th.classList.add('is-dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        try { e.dataTransfer.setData('text/plain', dragKey); } catch (err) { /* ignore */ }
+      }
+    });
+
+    theadRow.addEventListener('dragend', () => {
+      $$('th[data-key]', theadRow).forEach(t => t.classList.remove('is-dragging', 'is-drop-target'));
+      dragKey = null;
+    });
+
+    theadRow.addEventListener('dragover', e => {
+      const th = e.target.closest('th[data-key]');
+      if (!th || !dragKey) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      $$('th[data-key]', theadRow).forEach(t => t.classList.toggle('is-drop-target', t === th));
+    });
+
+    theadRow.addEventListener('drop', e => {
+      const th = e.target.closest('th[data-key]');
+      if (!th || !dragKey || th.getAttribute('data-key') === dragKey) return;
+      e.preventDefault();
+      const dragged = $('th[data-key="' + dragKey + '"]', theadRow);
+      if (!dragged) return;
+      const rect = th.getBoundingClientRect();
+      if (e.clientX > rect.left + rect.width / 2) th.after(dragged);
+      else th.before(dragged);
+      state.colOrder = $$('th[data-key]', theadRow).map(t => t.getAttribute('data-key'));
+      saveColOrder(state.colOrder);
+      renderTable();
+    });
+  }
+
   function renderTable() {
     const rows = getFiltered();
     els.resultCount.textContent = `${rows.length} / ${state.stocks.length}`;
@@ -571,41 +698,10 @@
       const tags = (s.tags || []).slice(0, 2);
       const prevAmt = s.prevAuctionAmount == null ? '—'
         : `<span class="amount-dim">${fmtAmountYuan(s.prevAuctionAmount)}</span><em class="mul ${(s.auctionVsPrev || 0) >= 1 ? 'up' : 'down'}">×${fmtNum(s.auctionVsPrev, 2)}</em>`;
-      return `
-        <tr class="${selected ? 'is-selected' : ''}${grab ? ' is-grab' : ''}" data-code="${esc(s.code)}">
-          <td>
-            <button class="star-btn ${watched ? 'is-active' : ''}" data-action="watch" data-code="${esc(s.code)}" aria-label="${watched ? '取消自选' : '加入自选'}">
-              <i data-lucide="star" aria-hidden="true"></i>
-            </button>
-          </td>
-          <td class="stock-code">${esc(s.code)}</td>
-          <td>
-            <span class="stock-name">${esc(s.name)}${grab ? '<span class="grab-badge" title="竞价抢筹">抢筹</span>' : ''}${dbl ? `<span class="grab-badge dbl-badge" title="今日竞价额 ≥ 昨日竞价额 ${AUCTION_DOUBLE} 倍">竞价翻倍</span>` : ''}</span>
-            <span class="stock-sector">${esc(s.industry)}</span>
-          </td>
-          <td class="num col-prevlb ${s.prevLb >= 2 ? 'lb-high' : s.prevLb === 1 ? 'lb-one' : ''}">${s.prevLb >= 1 ? (s.prevLb + '板') : '—'}</td>
-          <td class="num">${fmtNum(s.price, 2)}</td>
-          <td class="num ${colorCls(s.changePct)}">${fmtPct(s.changePct)}</td>
-          <td class="num col-realtime ${rtCls(state.realtime[s.code])}">${state.realtime[s.code] != null ? fmtPct(state.realtime[s.code]) : '—'}</td>
-          <td class="num col-amount amount-strong">${fmtAmountYuan(s.auctionAmount)}</td>
-          <td class="num col-seal ${s.sealAmount ? 'seal-strong' : 'amount-dim'}">${s.sealAmount ? fmtAmountYuan(s.sealAmount) : '—'}</td>
-          <td class="num col-yamount amount-dim">${fmtAmountYuan(s.yesterdayAmount)}</td>
-          <td class="num col-prevAmount">${prevAmt}</td>
-          <td class="num col-strength ${levelCls(s.amountStrength, 100, 30)}">${fmtNum(s.amountStrength, 1)}</td>
-          <td class="num col-auctionTurnover ${levelCls(s.auctionTurnover, 1.5, 0.8)}">${fmtNum(s.auctionTurnover, 2)}%</td>
-          <td class="num col-market">${fmtYi(s.floatCap)}</td>
-          <td>
-            <div class="score-cell">
-              <span class="score-track"><span class="score-fill ${s.score >= 80 ? 'high' : ''}" style="width:${clamp(s.score || 0, 0, 100)}%"></span></span>
-              <span class="num ${levelCls(s.score, 80, 60)}">${fmtNum(s.score, 1)}</span>
-            </div>
-          </td>
-          <td>
-            <div class="tag-group">${tags.map(t => `<span class="tag ${TAG_CLASS[t] || 'tag'}">${esc(t)}</span>`).join('')}</div>
-          </td>
-          <td class="col-reason">${esc(reasonOf(s)) || '<span class="muted">—</span>'}</td>
-        </tr>
-      `;
+      const ctx = { watched, grab, dbl, tags, prevAmt };
+      return `<tr class="${selected ? 'is-selected' : ''}${grab ? ' is-grab' : ''}" data-code="${esc(s.code)}">`
+        + state.colOrder.map(k => cellHtml(s, k, ctx)).join('')
+        + `</tr>`;
     }).join('');
     renderSortArrows();
     refreshIcons();
@@ -649,7 +745,7 @@
         <div class="detail-head">
           <div class="detail-title">
             <div class="detail-name">
-              <h3>${esc(s.name)}</h3>
+              <h3>${stockLink(s.code, s.name)}</h3>
               <span class="detail-code">${esc(s.code)} · ${esc(s.industry)}</span>
             </div>
             <div class="detail-price">
@@ -1136,6 +1232,7 @@
         toggleWatch(star.getAttribute('data-code'));
         return;
       }
+      if (e.target.closest('a.stock-link')) return; // 点股票名/代码跳转东财，不选中行
       const tr = e.target.closest('tr[data-code]');
       if (tr) {
         state.selectedCode = tr.getAttribute('data-code');
@@ -1171,6 +1268,8 @@
   // ---------- 初始化 ----------
   function init() {
     bindEvents();
+    applyColOrder();
+    initColumnDrag();
     setDemoData();
     loadLatest();
     loadThsEmotion();

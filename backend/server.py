@@ -780,9 +780,10 @@ def _in_auction_window(now):
 
 
 def load_prev_auction_map(date_str):
-    """上一交易日快照的 {代码: 竞价额}，用于算"昨日竞价额"与放大倍数。
+    """上一交易日快照的 {代码: {"amount": 竞价额, "volume": 竞价量}}，
+    用于算"昨日竞价额/量"、放大倍数与竞价量比。
 
-    集合竞价成交额不在日K里（日K是全天成交额），只能从自己落盘的快照归档取。
+    集合竞价成交额/量不在日K里（日K是全天成交额/量），只能从自己落盘的快照归档取。
     只覆盖前一日快照 Top-N 内的个股，取不到的返回缺省（前端显示 —）。
     """
     prev = _prev_data_date(HISTORY_DIR, date_str)
@@ -793,9 +794,12 @@ def load_prev_auction_map(date_str):
         return {}
     out = {}
     for s in day.get("stocks") or []:
-        code, amt = s.get("code"), s.get("auctionAmount")
-        if code and amt:
-            out[code] = amt
+        code = s.get("code")
+        if code:
+            out[code] = {
+                "amount": s.get("auctionAmount"),
+                "volume": s.get("auctionVolume"),
+            }
     return out
 
 
@@ -855,16 +859,27 @@ def _build_snapshot(auto=False):
         if not s.get("industry") or s["industry"] in ("其他", ""):
             s["industry"] = sector_map.get(s["code"], "其他")
 
+    # 昨日竞价额/量：取自上一交易日快照归档（日K只有全天成交额/量，没有集合竞价成交额/量）
+    prev_auction = load_prev_auction_map(snapshot_date)
+    # 竞价量比：今日竞价量 / 昨日竞价量（腾讯源 lb 在竞价窗口恒为 0，替换之）
+    vr_matched = 0
+    for s in snapshot:
+        pv = (prev_auction.get(s.get("code")) or {}).get("volume")
+        vol = s.get("auctionVolume")
+        s["volumeRatio"] = round(vol / pv, 2) if (vol and pv) else None
+        if pv:
+            vr_matched += 1
+    print("[fetch] 昨日竞价量匹配 %d/%d" % (vr_matched, len(snapshot)), flush=True)
+
     stocks = [compute_metrics(s, yesterday_map.get(s["code"])) for s in snapshot]
     # 标注"昨N连板"：读最近一个交易日已落盘的涨停池，命中则补 prevLb（0=未涨停）
     prev_lb = load_prev_lb_map()
     for s in stocks:
         s["prevLb"] = prev_lb.get(s.get("code"), 0)
-    # 昨日竞价额：取自上一交易日快照归档（日K只有全天成交额，没有集合竞价成交额）
-    prev_auction = load_prev_auction_map(snapshot_date)
+    # 昨日竞价额：与上面 load_prev_auction_map 同源（避免重复读档）
     matched = 0
     for s in stocks:
-        pa = prev_auction.get(s.get("code"))
+        pa = (prev_auction.get(s.get("code")) or {}).get("amount")
         amt = s.get("auctionAmount")
         s["prevAuctionAmount"] = pa
         s["auctionVsPrev"] = round(amt / pa, 2) if (pa and amt) else None

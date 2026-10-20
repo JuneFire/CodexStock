@@ -594,6 +594,17 @@ input[type="search"] {
   color: var(--text-3);
 }
 
+/* 列拖拽 */
+th[data-key] {
+  cursor: grab;
+}
+th[data-key].is-dragging {
+  opacity: 0.35;
+}
+th[data-key].is-drop-target {
+  box-shadow: inset 2px 0 0 var(--accent-strong);
+}
+
 .th-star {
   width: 38px;
 }
