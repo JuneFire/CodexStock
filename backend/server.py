@@ -147,6 +147,8 @@ SEAL_BATCH_SIZE = 500       # 腾讯批量直连每批股票数
 SEAL_TOP_N = 20             # 全市场封单额取前 N
 
 AUCTION_TOP_N = 50          # 竞价金额抓取前 N 只（腾讯/东财/akshare 统一）
+AUCTION_DYN_TTL = 90        # 竞价动态页增强数据缓存秒数
+AUCTION_DYN_CACHE = {"ts": 0.0, "date": None, "rows": None}
 AUCTION_TOP_RANK_N = 60     # 竞价榜页面取竞价额前 N（按日期归档）
 
 PLAN_FETCH_HM = 8 * 60 + 30  # 早晨 8:30 自动生成当天早盘预案
@@ -1889,6 +1891,107 @@ def seal_fetch_loop(enabled=True):
             continue
         time.sleep(max(1, (_hm_time(now, target) - datetime.now()).total_seconds()))
         _run_seal_sample(target)
+
+
+def _tx_market_line(code):
+    """抓腾讯五档行情单行，返回原始 line（str）| None。逐只请求，失败静默。"""
+    try:
+        resp = _gtimg_get("https://qt.gtimg.cn/q=" + _tx_symbol(code))
+    except Exception:
+        return None
+    for line in (resp.text or "").splitlines():
+        if line.startswith("v_") and "=" in line:
+            return line
+    return None
+
+
+def _tx_ask1_amount(line):
+    """从腾讯行情行取卖一挂单额（元）= 卖一价 × 卖一量 × 100。
+
+    竞价 09:25 定盘那一刻，涨停股的「卖一」就是涨停价上被吃掉的委托，
+    其挂单额等价于该时刻涨停价位的委买额；未涨停股恒为小值或 0。
+    """
+    if not line or "=" not in line:
+        return None
+    fields = line.split("=", 1)[1].strip().strip('"').strip(";").split("~")
+    if len(fields) < 17:
+        return None
+    price = to_float(fields[TX_ASK1_PRICE_IDX])
+    vol = to_float(fields[TX_ASK1_VOL_IDX])
+    if price is None or vol is None or price <= 0 or vol <= 0:
+        return None
+    return round(price * vol * 100, 2)
+
+
+def _auction_dyn_enrich(records):
+    """竞价榜记录增强：补 limitPct / limitUpPrice / openPx / bs / fmcap / lbuy。
+
+    - limitPct：按代码前缀推断涨跌幅限制（主板 10%，ST 5%，创业板/科创板 20%，北交所 30%）
+    - limitUpPrice = prevClose × (1 + limitPct/100)
+    - openPx：竞价定盘价。竞价窗口内 price 即定盘价；盘中/盘后需由 changePct 反推
+    - bs（竞价强度‱）= auctionAmount / floatCap × 10000
+    - fmcap（自由流通市值）= auctionAmount /(turnover/100)
+    - lbuy（09:25 涨停委买额）：腾讯卖一挂单额。**仅竞价窗口内（09:25-09:30）调用才准确**，
+      窗口外返回 None 并置 lbuyStale=True，前端显示「—」。
+    - ps/plt（连板）、obp/obs（尾秒）、themes（题材）：腾讯/东财源不提供，恒为 None
+    """
+    now = datetime.now()
+    in_window = _in_auction_window(now)
+    out = []
+    for r in records:
+        rec = dict(r)
+        code = str(rec.get("code") or "")
+        prev_close = to_float(rec.get("prevClose"))
+        amount = to_float(rec.get("auctionAmount")) or 0.0
+        fcap = to_float(rec.get("floatCap")) or 0.0
+        turnover = to_float(rec.get("turnover"))
+
+        # 涨跌停幅度
+        name = str(rec.get("name") or "")
+        if code.startswith(("300", "301", "688", "689")):
+            limit_pct = 20.0
+        elif code.startswith(("4", "8")):
+            limit_pct = 30.0
+        else:
+            limit_pct = 5.0 if "ST" in name.upper() else 10.0
+        rec["limitPct"] = limit_pct
+        rec["limitUpPrice"] = round(prev_close * (1 + limit_pct / 100.0), 2) if prev_close else None
+
+        # 竞价开盘价
+        if in_window and to_float(rec.get("price")):
+            rec["openPx"] = to_float(rec.get("price"))
+        elif prev_close and rec.get("changePct") is not None:
+            rec["openPx"] = round(prev_close * (1 + to_float(rec.get("changePct")) / 100.0), 2)
+        else:
+            rec["openPx"] = None
+
+        # 竞价强度 ‱
+        rec["bs"] = round(amount / fcap * 10000, 2) if fcap > 0 else None
+        # 自由流通市值（反推）
+        rec["fmcap"] = round(amount / (turnover / 100.0), 2) if (turnover and turnover > 0 and amount > 0) else None
+
+        # 09:25 涨停委买额（腾讯卖一）—— 仅竞价窗口
+        rec["lbuy"] = None
+        rec["lbuySource"] = None
+        if in_window:
+            line = _tx_market_line(code)
+            amt = _tx_ask1_amount(line)
+            if amt:
+                rec["lbuy"] = amt
+                rec["lbuySource"] = "tx_ask1"
+        rec["lbuyStale"] = not in_window
+
+        # 源不提供，恒空（前端显示「—」）
+        rec.setdefault("ps", None)
+        rec.setdefault("plt", None)
+        rec.setdefault("obp", None)
+        rec.setdefault("obs", None)
+        rec.setdefault("themes", [rec["industry"]] if rec.get("industry") and rec["industry"] != "其他" else [])
+        rec.setdefault("lbuy0915", None)
+        rec.setdefault("lbuy0920t", None)
+        rec.setdefault("src", "amt")
+        out.append(rec)
+    return out
 
 
 def fetch_auction_top(n=AUCTION_TOP_RANK_N):
@@ -4621,6 +4724,46 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "未找到该日期封单数据: %s" % date}, status=404)
             else:
                 self.send_json({"ok": True, "date": date, "rows": rows})
+            return
+        if parsed.path == "/api/auction_top/dynamic":
+            qs = parse_qs(parsed.query)
+            date = (qs.get("date") or [""])[0]
+            force = (qs.get("force") or [""])[0] in ("1", "true", "yes")
+            if not date:
+                self.send_json({"ok": False, "error": "缺少 date 参数"}, status=400)
+                return
+            now = datetime.now()
+            today = now.strftime("%Y-%m-%d")
+            cache = AUCTION_DYN_CACHE
+            use_cache = (not force and cache["rows"] is not None
+                         and cache["date"] == date
+                         and (time.time() - cache["ts"]) < AUCTION_DYN_TTL)
+            if use_cache:
+                self.send_json({"ok": True, "date": date, "rows": cache["rows"],
+                                "cached": True, "inWindow": _in_auction_window(now),
+                                "age": round(time.time() - cache["ts"], 1)})
+                return
+            fallback = False
+            try:
+                rows = db.get_auction_top(date)
+            except Exception:
+                rows = None
+            if not rows:
+                rows = _auction_top_json_day(date)
+                fallback = rows is not None
+            if not rows:
+                self.send_json({"ok": False, "error": "未找到该日期竞价榜数据: %s" % date}, status=404)
+                return
+            try:
+                rows = _auction_dyn_enrich(rows)
+            except Exception as exc:
+                # 增强失败不能拖垮主数据：原样返回并附告警
+                self.send_json({"ok": True, "date": date, "rows": rows, "fallback": fallback,
+                                "enrichError": str(exc)})
+                return
+            AUCTION_DYN_CACHE.update({"ts": time.time(), "date": date, "rows": rows})
+            self.send_json({"ok": True, "date": date, "rows": rows, "fallback": fallback,
+                            "cached": False, "inWindow": _in_auction_window(now)})
             return
         if parsed.path == "/api/auction_top/dates":
             try:

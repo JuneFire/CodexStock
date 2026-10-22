@@ -217,6 +217,21 @@ a.btn {
   border-color: var(--accent-strong);
 }
 
+/* 金色强调按钮：用于「竞价窗口」等高亮入口 */
+.btn-gold {
+  background: linear-gradient(135deg, #e8a020, #d18b00);
+  border-color: #d18b00;
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(209, 139, 0, 0.3);
+}
+
+.btn-gold:hover {
+  background: linear-gradient(135deg, #f0ad2e, #e09a08);
+  border-color: #e09a08;
+  box-shadow: 0 2px 6px rgba(209, 139, 0, 0.42);
+}
+
 .btn-ghost {
   border-color: transparent;
   background: transparent;
