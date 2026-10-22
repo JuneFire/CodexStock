@@ -129,9 +129,11 @@ SCHEMA = [
         name VARCHAR(64) NOT NULL DEFAULT '',
         industry VARCHAR(64) NOT NULL DEFAULT '',
         price DECIMAL(12,3) NULL,
+        prev_close DECIMAL(12,3) NULL,
         change_pct DECIMAL(8,3) NULL,
         auction_amount DECIMAL(20,2) NULL,
         auction_volume DECIMAL(20,2) NULL,
+        seal_amount DECIMAL(20,2) NULL,
         turnover DECIMAL(10,3) NULL,
         volume_ratio DECIMAL(10,3) NULL,
         float_cap DECIMAL(20,2) NULL,
@@ -264,6 +266,12 @@ def ensure_schema():
                         pass
                     try:
                         cur.execute("ALTER TABLE sentiment_review ADD COLUMN %s" % col)
+                    except Exception:
+                        pass
+                # auction_top 旧表补 prev_close / seal_amount（竞价动态页需要昨收与封单额）
+                for col in ("prev_close DECIMAL(12,3) NULL", "seal_amount DECIMAL(20,2) NULL"):
+                    try:
+                        cur.execute("ALTER TABLE auction_top ADD COLUMN %s" % col)
                     except Exception:
                         pass
             conn.commit()
@@ -917,18 +925,20 @@ def list_seal_dates(limit=120):
 
 AUCTION_TOP_UPSERT_SQL = """
 INSERT INTO auction_top (
-    trade_date, code, name, industry, price, change_pct,
-    auction_amount, auction_volume, turnover, volume_ratio, float_cap, total_cap, `rank`, fetched_at
+    trade_date, code, name, industry, price, prev_close, change_pct,
+    auction_amount, auction_volume, seal_amount, turnover, volume_ratio, float_cap, total_cap, `rank`, fetched_at
 ) VALUES (
-    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
 )
 ON DUPLICATE KEY UPDATE
     name = VALUES(name),
     industry = VALUES(industry),
     price = VALUES(price),
+    prev_close = VALUES(prev_close),
     change_pct = VALUES(change_pct),
     auction_amount = VALUES(auction_amount),
     auction_volume = VALUES(auction_volume),
+    seal_amount = VALUES(seal_amount),
     turnover = VALUES(turnover),
     volume_ratio = VALUES(volume_ratio),
     float_cap = VALUES(float_cap),
@@ -945,9 +955,11 @@ def _auction_top_values(r):
         str(r.get("name") or ""),
         str(r.get("industry") or ""),
         _num(r.get("price")),
+        _num(r.get("prevClose")),
         _num(r.get("changePct")),
         _num(r.get("auctionAmount")),
         _num(r.get("auctionVolume")),
+        _num(r.get("sealAmount")),
         _num(r.get("turnover")),
         _num(r.get("volumeRatio")),
         _num(r.get("floatCap")),
@@ -990,9 +1002,11 @@ def _auction_top_from_row(r):
         "name": r["name"],
         "industry": r["industry"],
         "price": _num(r["price"]),
+        "prevClose": _num(r.get("prev_close")),
         "changePct": _num(r["change_pct"]),
         "auctionAmount": _num(r["auction_amount"]),
         "auctionVolume": _num(r["auction_volume"]),
+        "sealAmount": _num(r.get("seal_amount")),
         "turnover": _num(r["turnover"]),
         "volumeRatio": _num(r["volume_ratio"]),
         "floatCap": _num(r["float_cap"]),

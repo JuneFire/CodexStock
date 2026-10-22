@@ -1893,36 +1893,6 @@ def seal_fetch_loop(enabled=True):
         _run_seal_sample(target)
 
 
-def _tx_market_line(code):
-    """抓腾讯五档行情单行，返回原始 line（str）| None。逐只请求，失败静默。"""
-    try:
-        resp = _gtimg_get("https://qt.gtimg.cn/q=" + _tx_symbol(code))
-    except Exception:
-        return None
-    for line in (resp.text or "").splitlines():
-        if line.startswith("v_") and "=" in line:
-            return line
-    return None
-
-
-def _tx_ask1_amount(line):
-    """从腾讯行情行取卖一挂单额（元）= 卖一价 × 卖一量 × 100。
-
-    竞价 09:25 定盘那一刻，涨停股的「卖一」就是涨停价上被吃掉的委托，
-    其挂单额等价于该时刻涨停价位的委买额；未涨停股恒为小值或 0。
-    """
-    if not line or "=" not in line:
-        return None
-    fields = line.split("=", 1)[1].strip().strip('"').strip(";").split("~")
-    if len(fields) < 17:
-        return None
-    price = to_float(fields[TX_ASK1_PRICE_IDX])
-    vol = to_float(fields[TX_ASK1_VOL_IDX])
-    if price is None or vol is None or price <= 0 or vol <= 0:
-        return None
-    return round(price * vol * 100, 2)
-
-
 def _auction_dyn_enrich(records):
     """竞价榜记录增强：补 limitPct / limitUpPrice / openPx / bs / fmcap / lbuy。
 
@@ -1931,12 +1901,28 @@ def _auction_dyn_enrich(records):
     - openPx：竞价定盘价。竞价窗口内 price 即定盘价；盘中/盘后需由 changePct 反推
     - bs（竞价强度‱）= auctionAmount / floatCap × 10000
     - fmcap（自由流通市值）= auctionAmount /(turnover/100)
-    - lbuy（09:25 涨停委买额）：腾讯卖一挂单额。**仅竞价窗口内（09:25-09:30）调用才准确**，
+    - lbuy（09:25 涨停委买额）= 腾讯卖一挂单额（卖一价 × 卖一量 × 100）。
+      批量一次抓完，不逐只请求；**仅竞价窗口内（09:25-09:30）调用才准确**，
       窗口外返回 None 并置 lbuyStale=True，前端显示「—」。
     - ps/plt（连板）、obp/obs（尾秒）、themes（题材）：腾讯/东财源不提供，恒为 None
     """
     now = datetime.now()
     in_window = _in_auction_window(now)
+
+    # 竞价窗口内：一次性批量抓腾讯五档，算出各股「卖一挂单额」作为涨停委买额
+    lbuy_map = {}
+    if in_window:
+        codes = [str(r.get("code") or "") for r in records if r.get("code")]
+        try:
+            quotes = fetch_seal_quotes(codes) or {}
+        except Exception:
+            quotes = {}
+        for code, q in quotes.items():
+            ask_p = to_float(q.get("ask1Price"))
+            ask_v = to_float(q.get("ask1Volume"))
+            if ask_p and ask_v and ask_p > 0 and ask_v > 0:
+                lbuy_map[code] = round(ask_p * ask_v * 100, 2)
+
     out = []
     for r in records:
         rec = dict(r)
@@ -1971,14 +1957,8 @@ def _auction_dyn_enrich(records):
         rec["fmcap"] = round(amount / (turnover / 100.0), 2) if (turnover and turnover > 0 and amount > 0) else None
 
         # 09:25 涨停委买额（腾讯卖一）—— 仅竞价窗口
-        rec["lbuy"] = None
-        rec["lbuySource"] = None
-        if in_window:
-            line = _tx_market_line(code)
-            amt = _tx_ask1_amount(line)
-            if amt:
-                rec["lbuy"] = amt
-                rec["lbuySource"] = "tx_ask1"
+        rec["lbuy"] = lbuy_map.get(code)
+        rec["lbuySource"] = "tx_ask1" if rec["lbuy"] else None
         rec["lbuyStale"] = not in_window
 
         # 源不提供，恒空（前端显示「—」）
@@ -4744,13 +4724,15 @@ class Handler(SimpleHTTPRequestHandler):
                                 "age": round(time.time() - cache["ts"], 1)})
                 return
             fallback = False
-            try:
-                rows = db.get_auction_top(date)
-            except Exception:
-                rows = None
+            # 动态页需要 prevClose / sealAmount 完整字段：优先读 JSON 归档（字段最全），
+            # 归档缺失时才回落到 MySQL（旧表可能无这两列）。
+            rows = _auction_top_json_day(date)
             if not rows:
-                rows = _auction_top_json_day(date)
-                fallback = rows is not None
+                try:
+                    rows = db.get_auction_top(date)
+                except Exception:
+                    rows = None
+                fallback = True
             if not rows:
                 self.send_json({"ok": False, "error": "未找到该日期竞价榜数据: %s" % date}, status=404)
                 return
