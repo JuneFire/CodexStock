@@ -2050,6 +2050,18 @@ def _auction_dyn_enrich(records):
         else:
             rec["openPx"] = None
 
+        # 竞价是否封住涨停（决定「封单/金额封单比」这类指标是否适用）
+        # 不能用 changePct 比值判定：低价股涨停价两位小数舍入会产生 9.93%/10.06%
+        # 之类的涨幅，百分比判别会误杀，必须直接比价格。
+        _lpx = rec.get("limitUpPrice")
+        _opx = rec.get("openPx")
+        if _lpx and _opx:
+            rec["isLimitUp"] = bool(_opx >= _lpx - 0.005)
+        elif rec.get("isLimitUpOpen") is not None:
+            rec["isLimitUp"] = bool(rec.get("isLimitUpOpen"))
+        else:
+            rec["isLimitUp"] = False
+
         # 竞价强度 ‱
         rec["bs"] = round(amount / fcap * 10000, 2) if fcap > 0 else None
         # 自由流通市值（反推）

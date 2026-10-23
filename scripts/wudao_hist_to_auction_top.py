@@ -81,6 +81,9 @@ def convert_row(src, rank, date_str):
         "tradeDate": date_str,
         "fetchedAt": "%s 09:25:30" % date_str,
         "sealAmount": seal,
+        # 悟道的 seal 取的是「涨停价上的买盘额」(limitBuyAmount)。竞价没封住涨停时
+        # 它只是挂在涨停价的委托，不是封单，前端据此把这些行显示为「—」。
+        "sealIsLimitBid": True,
         # —— 悟道独有的增强字段（本地抓取拿不到）——
         "ps": src.get("prevStreak"),
         "plt": src.get("prevLimitUpType") or None,
