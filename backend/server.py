@@ -2041,9 +2041,10 @@ def _auction_dyn_enrich(records):
         rec["limitPct"] = limit_pct
         rec["limitUpPrice"] = _limit_up_price(prev_close, code, name)
 
-        # 竞价开盘价
-        if in_window and to_float(rec.get("price")):
-            rec["openPx"] = to_float(rec.get("price"))
+        # 竞价开盘价（优先级：归档直给的 open → 归档 price（竞价价）→ 用涨幅反推）
+        px = to_float(rec.get("open")) or to_float(rec.get("price"))
+        if px:
+            rec["openPx"] = px
         elif prev_close and rec.get("changePct") is not None:
             rec["openPx"] = round(prev_close * (1 + to_float(rec.get("changePct")) / 100.0), 2)
         else:
@@ -2067,6 +2068,7 @@ def _auction_dyn_enrich(records):
         rec.setdefault("themes", [rec["industry"]] if rec.get("industry") and rec["industry"] != "其他" else [])
         rec.setdefault("lbuy0915", None)
         rec.setdefault("lbuy0920t", None)
+        rec.setdefault("trf", None)
         rec.setdefault("src", "amt")
         out.append(rec)
     return out
@@ -4866,20 +4868,59 @@ class Handler(SimpleHTTPRequestHandler):
                         r["lbuy"] = r["lbuy0925"]
                         r["lbuySource"] = "auction_seal"
                         r["lbuyStale"] = False
+
+            # 无 auction_seal 存档时，用悟道行自带的「09:20 前 / 09:20 后 / 09:25 终值」兜底
+            # （悟道口径的预涨停委买额，对涨停股才非零）
+            wudaoHit = 0
+            for r in rows:
+                pre = to_float(r.get("preLimitBuyAmount"))
+                aft = to_float(r.get("limitBuyAmountAfter920"))
+                fin = to_float(r.get("limitBuyAmount"))
+                if r.get("lbuy0915") is None and pre is not None:
+                    r["lbuy0915"] = pre
+                if r.get("lbuy0920t") is None and aft is not None:
+                    r["lbuy0920t"] = aft
+                if r.get("lbuy0925") is None and fin is not None:
+                    r["lbuy0925"] = fin
+                if r.get("lbuy0925"):
+                    r["lbuy"] = r["lbuy0925"]
+                    if r.get("lbuySource") is None:
+                        r["lbuySource"] = "wudao"
+                    r["lbuyStale"] = False
+                if pre is not None or aft is not None:
+                    wudaoHit += 1
             AUCTION_DYN_CACHE.update({"ts": time.time(), "date": date, "rows": rows})
             self.send_json({"ok": True, "date": date, "rows": rows, "fallback": fallback,
                             "cached": False, "inWindow": _in_auction_window(now),
-                            "sealHit": sealHit})
+                            "sealHit": sealHit, "wudaoHit": wudaoHit})
             return
         if parsed.path == "/api/auction_top/dates":
+            # 两个数据源取并集：MySQL 表 + data/auction_top/*.json 归档。
+            # 只靠 MySQL 会出现「表存在但该日无行 → 返回 []」而不降级，
+            # 结果日期下拉整个空掉（本地归档有 130+ 天也看不到）。
+            merged = {}
+            err = None
             try:
-                dates = db.list_auction_top_dates()
+                for d in db.list_auction_top_dates() or []:
+                    if d.get("date"):
+                        merged[d["date"]] = {"date": d["date"], "count": int(d.get("count") or 0),
+                                             "src": "db"}
             except Exception as exc:
-                # MySQL 不可用 → 降级读 data/auction_top/*.json 归档
-                self.send_json({"ok": True, "dates": _auction_top_json_dates(),
-                                "fallback": True, "error": "MySQL 不可用，已从 JSON 归档读取: %s" % exc})
-                return
-            self.send_json({"ok": True, "dates": dates})
+                err = str(exc)
+            for d in _auction_top_json_dates() or []:
+                cur = merged.get(d["date"])
+                if cur:
+                    cur["src"] = "db+file"
+                    cur["count"] = max(int(cur["count"]), int(d.get("count") or 0))
+                else:
+                    merged[d["date"]] = {"date": d["date"], "count": int(d.get("count") or 0),
+                                          "src": "file"}
+            dates = sorted(merged.values(), key=lambda d: d["date"], reverse=True)
+            payload = {"ok": True, "dates": dates, "fallback": not any(
+                d.get("src") in ("db", "db+file") for d in dates)}
+            if err:
+                payload["error"] = "MySQL 不可用，已从 JSON 归档读取: %s" % err
+            self.send_json(payload)
             return
         if parsed.path == "/api/auction_top":
             date = (parse_qs(parsed.query).get("date") or [""])[0]
@@ -4890,6 +4931,10 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 rows = db.get_auction_top(date)
             except Exception:
+                rows = None
+            # MySQL 通了但该日无数据时也必须回落到文件归档（之前只在抛异常时降级，
+            # 导致归档有 130+ 天却全部 404）
+            if not rows:
                 rows = _auction_top_json_day(date)
                 fallback = rows is not None
             if not rows:

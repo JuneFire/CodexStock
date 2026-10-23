@@ -136,11 +136,11 @@ const COLS = {
   name:  {label:'名称',           w:80,  align:'left',  render:r=>`<span style="font-weight:600" class="${(r.chg||0)>=9.5?'up':''}">${esc(r.name)}</span>`},
   code:  {label:'代码',           w:66,  align:'left',  render:r=>`<span class="dim">${esc(r.code)}</span>`},
   openPx:{label:'竞价开盘价',     w:90,  render:r=>r.openPx>0?`<span class="${cls(r.chg)}" style="font-weight:600">${r.openPx.toFixed(2)}</span>`:'<span class="neu">—</span>'},
-  ps:    {label:'几天几板',       w:96,  src:false, render:r=>{
+  ps:    {label:'几天几板',       w:96,  render:r=>{
     if(!r.ps || r.ps<=0) return '<span class="neu">—</span>';
     return `<span class="chain">${r.ps}板</span> <span class="dim">${esc(r.plt||'涨停')}</span>`;
   }},
-  plt:   {label:'昨日板型',       w:76,  align:'left', src:false, render:r=>r.plt?`<span class="dim">${esc(r.plt)}</span>`:'<span class="neu">—</span>'},
+  plt:   {label:'昨日板型',       w:76,  align:'left', render:r=>r.plt?`<span class="dim">${esc(r.plt)}</span>`:'<span class="neu">—</span>'},
   seal:  {label:'封单额',         w:82,  render:r=>r.seal>0?yi(r.seal):'<span class="neu">—</span>'},
   amtSealRatio:{label:'金额封单比', w:104, render:r=>{
     if(!(r.seal>0) || !(r.amt>0)) return '<span class="neu">—</span>';
@@ -164,29 +164,29 @@ const COLS = {
     const col = pct>=90?'up':(pct>=30?'':'down');
     return `<span class="${col}">${pct.toFixed(1)}%</span>`;
   }},
-  lbuy0915:{label:'封单额(09:15)', w:110, render:r=>r.seal0915>0?yi(r.seal0915):'<span class="neu">—</span>'},
-  lbuy0920:{label:'封单额(09:20)', w:110, render:r=>r.seal0920>0?yi(r.seal0920):'<span class="neu">—</span>'},
-  lbuyDiff1520:{label:'封单变化 09:15→09:20', w:126, render:r=>{
-    if(!(r.seal0915>0) || !(r.seal0920>0)) return '<span class="neu">—</span>';
-    const d = r.seal0920 - r.seal0915, pct = d / r.seal0915 * 100;
+  lbuy0915:{label:'委买额(09:20前)', w:120, render:r=>r.lbuy0915>0?yi(r.lbuy0915):'<span class="neu">—</span>'},
+  lbuy0920:{label:'委买额(09:20后)', w:120, render:r=>r.lbuy0920t>0?yi(r.lbuy0920t):'<span class="neu">—</span>'},
+  lbuyDiff1520:{label:'委买变化 09:20前→后', w:140, render:r=>{
+    if(!(r.lbuy0915>0) || !(r.lbuy0920t>0)) return '<span class="neu">—</span>';
+    const d = r.lbuy0920t - r.lbuy0915, pct = d / r.lbuy0915 * 100;
     return `<span class="${cls(d)}">${d>0?'+':''}${yi(d)}</span> <span class="dim" style="font-size:11px">${pct>0?'+':''}${pct.toFixed(0)}%</span>`;
   }},
-  lbuyDiff2025:{label:'封单变化 09:20→09:25', w:126, render:r=>{
-    if(!(r.seal0920>0) || !(r.seal0925>0)) return '<span class="neu">—</span>';
-    const d = r.seal0925 - r.seal0920, pct = d / r.seal0920 * 100;
+  lbuyDiff2025:{label:'委买变化 09:20后→09:25', w:148, render:r=>{
+    if(!(r.lbuy0920t>0) || !(r.lbuy0925>0)) return '<span class="neu">—</span>';
+    const d = r.lbuy0925 - r.lbuy0920t, pct = d / r.lbuy0920t * 100;
     return `<span class="${cls(d)}">${d>0?'+':''}${yi(d)}</span> <span class="dim" style="font-size:11px">${pct>0?'+':''}${pct.toFixed(0)}%</span>`;
   }},
   chg:   {label:'竞价涨幅',       w:80,  render:r=>r.chg==null?'<span class="neu">—</span>':`<span class="${cls(r.chg)}">${sgn(r.chg)}</span>`},
   amt:   {label:'竞价金额',       w:82,  render:r=>r.amt>0?yi(r.amt):'<span class="neu">—</span>'},
   tr:    {label:'竞价换手%',      w:80,  render:r=>r.tr==null?'<span class="neu">—</span>':r.tr.toFixed(2)},
-  trf:   {label:'自由流通换手%',  w:100, src:false, render:r=>r.trf==null?'<span class="neu">—</span>':r.trf.toFixed(2)},
+  trf:   {label:'自由流通换手%',  w:100, render:r=>r.trf==null?'<span class="neu">—</span>':r.trf.toFixed(2)},
   fmcap: {label:'自由流通市值',   w:96,  render:r=>r.fmcap>0?yi(r.fmcap):'<span class="neu">—</span>'},
   mcap:  {label:'流通市值',       w:82,  render:r=>r.mcap>0?yi(r.mcap):'<span class="neu">—</span>'},
-  obp:   {label:'尾秒%',          w:70,  src:false, render:r=>{
+  obp:   {label:'尾秒%',          w:70,  render:r=>{
     if(r.obp==null) return '<span class="neu">—</span>';
     return r.obs==='neutral'?'<span class="neu">—</span>':`<span class="${cls(r.obp)}">${sgn(r.obp)}</span>`;
   }},
-  obs:   {label:'尾秒信号',       w:86,  src:false, render:r=>{
+  obs:   {label:'尾秒信号',       w:86,  render:r=>{
     if(r.obs==='late_bid_up') return '<span class="lu">● 抢筹</span>';
     if(r.obs==='late_bid_down') return '<span class="ld">○ 撤退</span>';
     return '<span class="neu">—</span>';
@@ -246,17 +246,20 @@ function mapRow(r){
     lbuy: num(r.lbuy) || 0,
     lbuyStale: !!r.lbuyStale,
     lbuySource: r.lbuySource,
-    // 三时点封单额（来自 auction_seal 存档，09:15/09:20/09:25）
+    // 三时点涨停委买额（悟道 09:20前/后/09:25 或 auction_seal 存档 09:15/09:20/09:25）
     seal0915: num(r.seal0915) || 0,
     seal0920: num(r.seal0920) || 0,
     seal0925: num(r.seal0925) || 0,
     lbuy0915: num(r.lbuy0915) || 0,
     lbuy0920t: num(r.lbuy0920t) || 0,
     lbuy0925: num(r.lbuy0925),
-    // 数据源不提供
-    ps: null, plt: null, obp: null, obs: null,
-    avgPx: null,
-    trf: null,
+    // 悟道独有字段（本地抓取拿不到）
+    ps: (r.ps==null?null:num(r.ps)),
+    plt: r.plt || null,
+    obp: (r.obp==null?null:num(r.obp)),
+    obs: r.obs || null,
+    trf: (r.trf==null?null:num(r.trf)),
+    avgPx: (r.avgPx==null?null:num(r.avgPx)),
     themes: Array.isArray(r.themes) ? r.themes : (r.industry && r.industry!=='其他' ? [r.industry] : []),
   };
 }
