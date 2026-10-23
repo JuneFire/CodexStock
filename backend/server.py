@@ -144,7 +144,8 @@ AUTO_FETCH_IDLE_SECONDS = 300  # 当日抓取成功后静默等待，不再 20 �
 # 竞价封单额：三个抓取时点；封单额 = 买一量(手)×100×买一价(元)
 SEAL_SAMPLE_TIMES = ["09:15", "09:20", "09:25"]
 SEAL_BATCH_SIZE = 500       # 腾讯批量直连每批股票数
-SEAL_TOP_N = 20             # 全市场封单额取前 N
+SEAL_TOP_N = 60             # 全市场封单额取前 N
+SEAL_KEEP_LIMIT_UP = True   # 无论排名，所有「买一价=涨停价」的票都保留（涨停委买额必须完整）
 
 AUCTION_TOP_N = 50          # 竞价金额抓取前 N 只（腾讯/东财/akshare 统一）
 AUCTION_DYN_TTL = 90        # 竞价动态页增强数据缓存秒数
@@ -960,14 +961,25 @@ def _build_snapshot(auto=False):
     return snapshot_data
 
 
+def _next_trade_day_at(hour, minute, second=0):
+    """下一个交易日的指定时刻（跳过周末与节假日），返回 datetime。"""
+    now = datetime.now()
+    fallback = (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=second, microsecond=0)
+    for offset in range(1, 16):
+        cand = (now + timedelta(days=offset)).replace(hour=hour, minute=minute, second=second, microsecond=0)
+        if cand.weekday() >= 5:
+            continue
+        try:
+            if is_trading_day(cand):
+                return cand
+        except Exception:
+            return cand
+    return fallback
+
+
 def sleep_until_next_auction():
     """抓取成功后静默到下一个交易日 9:25，当天不再 20 秒反复检查。"""
-    now = datetime.now()
-    for offset in range(1, 8):
-        nxt = (now + timedelta(days=offset)).replace(hour=9, minute=25, second=0, microsecond=0)
-        if nxt.weekday() < 5:
-            return max(1, (nxt - now).total_seconds())
-    return AUTO_FETCH_IDLE_SECONDS
+    return max(1, (_next_trade_day_at(9, 25) - datetime.now()).total_seconds())
 
 
 def _hm(t):
@@ -983,13 +995,8 @@ def _hm_time(now, t):
 
 
 def _sleep_until_trade_morning():
-    """静默到下一个交易日 9:15 前（9:14:30），用于封单线程跨日等待。"""
-    now = datetime.now()
-    for offset in range(1, 8):
-        nxt = (now + timedelta(days=offset)).replace(hour=9, minute=14, second=30, microsecond=0)
-        if nxt.weekday() < 5:
-            return max(1, (nxt - now).total_seconds())
-    return AUTO_FETCH_IDLE_SECONDS
+    """静默到下一个交易日 9:14:30，用于封单线程跨日等待（自动跳过周末与节假日）。"""
+    return max(1, (_next_trade_day_at(9, 14, 30) - datetime.now()).total_seconds())
 
 
 def auto_fetch_loop(enabled=True):
@@ -1834,32 +1841,58 @@ def fetch_seal_quotes(codes):
 
 
 def fetch_seal_top20(sample_time, now=None):
-    """扫描全市场，按封单额降序取前 SEAL_TOP_N。
+    """扫描全市场，按封单额（买一量×买一价）降序取前 SEAL_TOP_N。
 
-    返回 {"date","sampleTime","records":[ {code,name,sealAmount,sealRank,...} ],"scanned"}
+    SEAL_KEEP_LIMIT_UP=True 时，额外强制保留所有「买一价 = 涨停价」的票，
+    不管它们排第几名——涨停委买额只对封板的票有意义，漏一只就少一只的分析。
+
+    返回 {"date","sampleTime","records":[ {code,name,sealAmount,sealRank,isLimitUpBid,...} ],"scanned"}
     """
     now = now or datetime.now()
     codes = fetch_all_codes()
     quotes = fetch_seal_quotes(codes)
     rows = []
     for code, q in quotes.items():
-        rows.append({"code": code, "name": q.pop("name", code), **q})
+        rec = {"code": code, "name": q.pop("name", code), **q}
+        lpx = _limit_up_price(to_float(rec.get("prevClose")), code, rec.get("name") or "")
+        bid_p = to_float(rec.get("bid1Price"))
+        rec["isLimitUpBid"] = bool(lpx and bid_p and bid_p >= lpx * 0.999)
+        rows.append(rec)
+
+    # 按封单额降序，并给每只票打全市场真实名次
     rows.sort(key=lambda r: (r.get("sealAmount") or 0), reverse=True)
-    rows = rows[:SEAL_TOP_N]
     for idx, r in enumerate(rows, start=1):
         r["sealRank"] = idx
+
+    keep = rows[:SEAL_TOP_N]
+    if SEAL_KEEP_LIMIT_UP:
+        seen = {r["code"] for r in keep}
+        for r in rows:
+            if r.get("isLimitUpBid") and r["code"] not in seen:
+                keep.append(r)
+                seen.add(r["code"])
+
+    for r in keep:
         r["tradeDate"] = now.strftime("%Y-%m-%d")
         r["sampleTime"] = sample_time
         r["fetchedAt"] = now.strftime("%Y-%m-%d %H:%M:%S")
+
     return {
         "date": now.strftime("%Y-%m-%d"),
         "sampleTime": sample_time,
-        "records": rows,
+        "records": keep,
         "scanned": len(codes),
+        "poolCount": len(rows),
+        "limitUpBidCount": sum(1 for r in rows if r.get("isLimitUpBid")),
     }
 
 
 def _run_seal_sample(sample_time):
+    now = datetime.now()
+    # 双保险：非交易日（含节假日）直接跳过，一个请求都不发
+    if now.weekday() >= 5 or not is_trading_day(now):
+        print("[seal] %s 非交易日，跳过" % sample_time, flush=True)
+        return
     try:
         snap = fetch_seal_top20(sample_time)
         if not snap["records"]:
@@ -1868,8 +1901,9 @@ def _run_seal_sample(sample_time):
         if not db.save_seal(snap["records"]):
             print("[seal] %s 入库失败: %s" % (sample_time, db.last_error()), flush=True)
         else:
-            print("[seal] %s 封单 Top%d 入库（扫描 %d 只）" % (
-                sample_time, len(snap["records"]), snap["scanned"]), flush=True)
+            print("[seal] %s 封单入库 %d 条（全市场 %d 只有买一，其中涨停封板 %d 只，扫描 %d 只）" % (
+                sample_time, len(snap["records"]), snap["poolCount"],
+                snap["limitUpBidCount"], snap["scanned"]), flush=True)
     except Exception as exc:
         print("[seal] %s 抓取失败: %r" % (sample_time, exc), flush=True)
 
@@ -1893,6 +1927,73 @@ def seal_fetch_loop(enabled=True):
         _run_seal_sample(target)
 
 
+def _limit_pct_for(code, name=""):
+    """按代码前缀 + 名称推断涨跌幅限制（%）。300/301/688/689 → 20%，4/8 开头 → 30%，ST → 5%，其余 10%。"""
+    code = str(code or "")
+    name = str(name or "")
+    if code.startswith(("300", "301", "688", "689")):
+        return 20.0
+    if code.startswith(("4", "8")):
+        return 30.0
+    if "ST" in name.upper():
+        return 5.0
+    return 10.0
+
+
+def _limit_up_price(prev_close, code="", name=""):
+    """涨停价（保留 2 位小数）。prev_close 缺失/非正时返回 None。"""
+    if not prev_close or prev_close <= 0:
+        return None
+    return round(prev_close * (1 + _limit_pct_for(code, name) / 100.0), 2)
+
+
+def _seal_bid_amount(quote, code="", name=""):
+    """买一挂单额（元）= 买一价 × 买一量(手) × 100。
+
+    返回 (amount, is_limit_up_bid)。买一缺失返回 (None, False)。
+    【关键】集合竞价期间涨停股的**卖一恒为 0**（没人愿意在涨停价卖出），
+    所以「涨停委买额」必须用**买一**，不能用卖一——用卖一会恒得 0。
+    """
+    bid_p = to_float(quote.get("bid1Price"))
+    bid_v = to_float(quote.get("bid1Volume"))
+    if not bid_p or bid_p <= 0 or not bid_v or bid_v <= 0:
+        return None, False
+    lpx = _limit_up_price(to_float(quote.get("prevClose")), code, name)
+    is_lu = bool(lpx and bid_p >= lpx * 0.999)
+    return round(bid_p * bid_v * 100, 2), is_lu
+
+
+def _load_seal_times(date_str):
+    """某日 auction_seal 三个时点的封单存档。
+
+    返回 {code: {"09:15": {"seal":元, "lbuy":元}, ...}}
+      - seal = 原始买一挂单额（买一价 × 买一量 × 100），**不要求涨停**
+      - lbuy = 涨停委买额，只有 买一价 ≥ 涨停价×0.999 才是它本身，否则 0
+    两者分开是因为竞价排行里的「封单额」是买一最大挂单（非涨停股也可能很大），
+    而「涨停委买额」必须封在涨停价上——混用会错得很难看。
+    MySQL 不可用时返回 {}，不影响调用方。
+    """
+    try:
+        rows = db.get_seal(date_str)
+    except Exception:
+        return {}
+    out = {}
+    for r in rows or []:
+        code = str(r.get("code") or "")
+        t = r.get("sampleTime")
+        if not code or not t:
+            continue
+        bid_p = to_float(r.get("bid1Price"))
+        bid_v = to_float(r.get("bid1Volume"))
+        lpx = _limit_up_price(to_float(r.get("prevClose")), code, r.get("name") or "")
+        raw = 0.0
+        if bid_p and bid_v and bid_v > 0:
+            raw = round(bid_p * bid_v * 100, 2)
+        is_lu = bool(lpx and bid_p and bid_p >= lpx * 0.999)
+        out.setdefault(code, {})[t] = {"seal": raw, "lbuy": raw if is_lu else 0.0}
+    return out
+
+
 def _auction_dyn_enrich(records):
     """竞价榜记录增强：补 limitPct / limitUpPrice / openPx / bs / fmcap / lbuy。
 
@@ -1901,27 +2002,29 @@ def _auction_dyn_enrich(records):
     - openPx：竞价定盘价。竞价窗口内 price 即定盘价；盘中/盘后需由 changePct 反推
     - bs（竞价强度‱）= auctionAmount / floatCap × 10000
     - fmcap（自由流通市值）= auctionAmount /(turnover/100)
-    - lbuy（09:25 涨停委买额）= 腾讯卖一挂单额（卖一价 × 卖一量 × 100）。
-      批量一次抓完，不逐只请求；**仅竞价窗口内（09:25-09:30）调用才准确**，
-      窗口外返回 None 并置 lbuyStale=True，前端显示「—」。
+    - lbuy（09:25 涨停委买额）= 腾讯**买一**挂单额（买一价 × 买一量 × 100），
+      且要求买一价 ≥ 涨停价×0.999（未封板记 0）。集合竞价期间涨停股卖一恒为 0，
+      用卖一必得 0，这是最容易踩的坑。仅竞价窗口内可取；窗口外置 lbuyStale=True，
+      由调用方改用 auction_seal 的 09:25 存档补齐。
     - ps/plt（连板）、obp/obs（尾秒）、themes（题材）：腾讯/东财源不提供，恒为 None
     """
     now = datetime.now()
-    in_window = _in_auction_window(now)
+    # 非交易日一律不抓：节假日 weekday<5 但休市，避免白发请求、无谓占用接口
+    trading = is_trading_day(now)
+    in_window = _in_auction_window(now) and trading
 
-    # 竞价窗口内：一次性批量抓腾讯五档，算出各股「卖一挂单额」作为涨停委买额
+    # 竞价窗口内：批量抓腾讯买一，算涨停委买额
     lbuy_map = {}
     if in_window:
         codes = [str(r.get("code") or "") for r in records if r.get("code")]
+        name_map = {str(r.get("code")): (r.get("name") or "") for r in records if r.get("code")}
         try:
             quotes = fetch_seal_quotes(codes) or {}
         except Exception:
             quotes = {}
         for code, q in quotes.items():
-            ask_p = to_float(q.get("ask1Price"))
-            ask_v = to_float(q.get("ask1Volume"))
-            if ask_p and ask_v and ask_p > 0 and ask_v > 0:
-                lbuy_map[code] = round(ask_p * ask_v * 100, 2)
+            amt, is_lu = _seal_bid_amount(q, code, name_map.get(code, ""))
+            lbuy_map[code] = amt if (amt and is_lu) else 0.0
 
     out = []
     for r in records:
@@ -1934,14 +2037,9 @@ def _auction_dyn_enrich(records):
 
         # 涨跌停幅度
         name = str(rec.get("name") or "")
-        if code.startswith(("300", "301", "688", "689")):
-            limit_pct = 20.0
-        elif code.startswith(("4", "8")):
-            limit_pct = 30.0
-        else:
-            limit_pct = 5.0 if "ST" in name.upper() else 10.0
+        limit_pct = _limit_pct_for(code, name)
         rec["limitPct"] = limit_pct
-        rec["limitUpPrice"] = round(prev_close * (1 + limit_pct / 100.0), 2) if prev_close else None
+        rec["limitUpPrice"] = _limit_up_price(prev_close, code, name)
 
         # 竞价开盘价
         if in_window and to_float(rec.get("price")):
@@ -1956,9 +2054,9 @@ def _auction_dyn_enrich(records):
         # 自由流通市值（反推）
         rec["fmcap"] = round(amount / (turnover / 100.0), 2) if (turnover and turnover > 0 and amount > 0) else None
 
-        # 09:25 涨停委买额（腾讯卖一）—— 仅竞价窗口
+        # 09:25 涨停委买额（腾讯买一 × 涨停价校验）—— 仅竞价窗口
         rec["lbuy"] = lbuy_map.get(code)
-        rec["lbuySource"] = "tx_ask1" if rec["lbuy"] else None
+        rec["lbuySource"] = "tx_bid1" if rec["lbuy"] else None
         rec["lbuyStale"] = not in_window
 
         # 源不提供，恒空（前端显示「—」）
@@ -4743,9 +4841,35 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": True, "date": date, "rows": rows, "fallback": fallback,
                                 "enrichError": str(exc)})
                 return
+            # 三时点封单存档（09:15 / 09:20 / 09:25）：盘中窗口外、历史日期都能显示
+            seal_times = _load_seal_times(date)
+            sealHit = 0
+            if seal_times:
+                for r in rows:
+                    s = seal_times.get(str(r.get("code") or ""))
+                    if not s:
+                        continue
+                    sealHit += 1
+
+                    def _pick(tk, k):
+                        v = s.get(tk)
+                        return v.get(k) if v else None
+
+                    r["seal0915"] = _pick("09:15", "seal")
+                    r["seal0920"] = _pick("09:20", "seal")
+                    r["seal0925"] = _pick("09:25", "seal")
+                    r["lbuy0915"] = _pick("09:15", "lbuy")
+                    r["lbuy0920t"] = _pick("09:20", "lbuy")
+                    r["lbuy0925"] = _pick("09:25", "lbuy")
+                    # 09:25 涨停委买额以存档为准（实时买一仅作为窗口内补充）
+                    if r["lbuy0925"]:
+                        r["lbuy"] = r["lbuy0925"]
+                        r["lbuySource"] = "auction_seal"
+                        r["lbuyStale"] = False
             AUCTION_DYN_CACHE.update({"ts": time.time(), "date": date, "rows": rows})
             self.send_json({"ok": True, "date": date, "rows": rows, "fallback": fallback,
-                            "cached": False, "inWindow": _in_auction_window(now)})
+                            "cached": False, "inWindow": _in_auction_window(now),
+                            "sealHit": sealHit})
             return
         if parsed.path == "/api/auction_top/dates":
             try:
