@@ -108,6 +108,30 @@ def convert_row(src, rank, date_str):
     }
 
 
+def _merge_buckets(data):
+    """把 buckets 里各分桶的行并进主行表。
+
+    auction_opening_snapshot 的 rows（=buckets.topBidAmount）会被服务端截断到 25~100 行，
+    但同一份响应里还带着限价开盘池、涨停委买池、尾秒抢筹/撤退池、昨日涨停/炸板反馈池。
+    这些桶合起来才是当日该看的全貌（否则涨停股、尾盘异动股会漏掉）。
+    只并 `bidAmount > 0` 的行——反馈池里未参与竞价的票不该进竞价榜。
+    """
+    rows = list(data.get("rows") or [])
+    seen = {str(r.get("code")) for r in rows}
+    added = 0
+    for _bname, bucket in (data.get("buckets") or {}).items():
+        for r in ((bucket or {}).get("rows") or []):
+            code = str(r.get("code") or "")
+            if not code or code in seen:
+                continue
+            if not num(r.get("bidAmount")):
+                continue
+            seen.add(code)
+            rows.append(r)
+            added += 1
+    return rows, added
+
+
 def convert_file(path, force=False, dry=False):
     base = os.path.splitext(os.path.basename(path))[0]
     out = os.path.join(OUT_DIR, base + ".json")
@@ -119,24 +143,26 @@ def convert_file(path, force=False, dry=False):
     except (OSError, ValueError) as exc:
         return base, "err(读取失败 %r)" % (exc,)
 
-    rows = data.get("rows") or []
+    rows, added = _merge_buckets(data)
     if not rows:
         return base, "skip(无 rows)"
     trade_date = base
     records = [convert_row(r, i + 1, trade_date) for i, r in enumerate(rows)]
+    if added:
+        pass  # 分桶并集已生效（added 仅用于下面的统计输出）
     # 按竞价额降序，rank 重排（悟道原 rank 是按 bidAmount 排的，保险起见重算）
     records.sort(key=lambda r: r.get("auctionAmount") or 0, reverse=True)
     for i, r in enumerate(records, start=1):
         r["rank"] = i
 
     if dry:
-        return base, "dry(%d 行)" % len(records)
+        return base, "dry(%d 行, 含分桶 +%d)" % (len(records), added)
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         json.dump({"date": trade_date, "fetchedAt": "%s 09:25:30" % trade_date,
                    "source": "wudao_auction_hist", "records": records},
                   f, ensure_ascii=False, indent=1)
-    return base, "ok(%d 行)" % len(records)
+    return base, ("ok(%d 行, 含分桶 +%d)" % (len(records), added)) if added else ("ok(%d 行)" % len(records))
 
 
 def main():

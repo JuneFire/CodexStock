@@ -264,6 +264,8 @@ function mapRow(r){
     lbuy: num(r.lbuy) || 0,
     lbuyStale: !!r.lbuyStale,
     lbuySource: r.lbuySource,
+    isLimitUp: !!r.isLimitUp,          // 竞价是否封住涨停（后端算：openPx vs limitUpPrice）
+    sealIsLimitBid: !!r.sealIsLimitBid, // 封单额是否只是“涨停价挂单”而非真封单
     // 三时点涨停委买额（悟道 09:20前/后/09:25 或 auction_seal 存档 09:15/09:20/09:25）
     seal0915: num(r.seal0915) || 0,
     seal0920: num(r.seal0920) || 0,
@@ -546,7 +548,10 @@ function fillDateSelect(){
   await fetchDates();
   fillDateSelect();
   if(DATES.length){
-    const target = (state.date && DATES.includes(state.date)) ? state.date : DATES[0];
+    // 复盘页默认落在最新交易日（DATES[0]）。只有当用户主动选了更早的日期
+    // 且该日期仍是最新时，才沿用——否则新的一天数据出来了还停在旧日期上。
+    const target = (state.date && DATES.includes(state.date) && state.date === DATES[0])
+      ? state.date : DATES[0];
     loadDate(target, false);
   }else{
     banner('warn',
