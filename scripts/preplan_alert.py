@@ -30,6 +30,7 @@ if hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import group_signals as gs          # noqa: E402
+import ai_client                    # noqa: E402
 import group_backtest as gb         # noqa: E402
 
 gb.fetch_kline = lambda *a, **k: []
@@ -42,6 +43,9 @@ CHAT_NOTIFY = "oc_747e8ff8540da7ee38a160b5bbacf687"      # 量化系统通知（
 IMG_DIR = os.path.join(ROOT, "data", "feishu", "alert_img")
 STATE = os.path.join(ROOT, "data", "feishu", "alert_state.json")
 LOG = os.path.join(ROOT, "logs", "preplan_alert.log")
+
+AI_ENABLED = os.environ.get("PREPLAN_AI", "").strip() in ("1", "true", "yes")
+AI_CACHE = os.path.join(ROOT, "data", "feishu", "ai_cache.json")
 
 REVERSE_WORDS = ("反核", "次弱", "地板", "跌停开", "低吸", "反包", "低位")
 BULL = ["低吸", "买入", "参与", "上车", "加仓", "一字", "卡位", "空间", "反包", "套利", "溢价",
@@ -122,7 +126,7 @@ def polarity(text, names, forward=True):
             if forward:
                 if m.start() > 0 and text[m.start() - 1] in "的之":
                     continue
-                ctx = text[m.end(): m.end() + 30]
+                ctx = text[m.end(): m.end() + 45]
             else:
                 ctx = text[max(0, m.start() - 30): m.end() + 30]
             if any(w in ctx for w in BEAR):
@@ -133,10 +137,11 @@ def polarity(text, names, forward=True):
 
 
 def parse_plans(texts, names_ctx):
-    """texts: [(时间, 文本)]；返回 (bull{code:name}, bear{code:name}, raw_notes)"""
+    """texts: [(时间, 文本)]；返回 (bull, bear, notes)"""
     n2c, keys = names_ctx
     bull, bear, notes = {}, {}, []
     joined = "\n".join(t for _, t in texts)
+    flat = "".join(t for _, t in texts)          # 去掉换行，抵消 OCR 折行
     # 1) 风标句剔除（两头都适用）
     feng = ""
     for seg in re.split(chr(10) + "|[。；]", joined):
@@ -162,11 +167,13 @@ def parse_plans(texts, names_ctx):
             if nm in feng:            # 只出现在风标句里 → 忽略
                 continue
             code = n2c[nm]
-            pol, sn = polarity(s, (nm,))
+            pol, sn = polarity(flat, (nm,))        # 在整段（无换行）上判，OCR 折行也能接上
             if pol == "bull":
-                bull.setdefault(code, {"name": nm, "section": cur, "snippet": s[:60]})
+                bull.setdefault(code, {"name": nm, "section": cur, "snippet": s[:60], "src": "rule"})
             elif pol == "bear":
-                bear.setdefault(code, {"name": nm, "section": cur, "snippet": s[:60]})
+                bear.setdefault(code, {"name": nm, "section": cur, "snippet": s[:60], "src": "rule"})
+            else:
+                notes.append({"line": s, "section": cur, "name": nm})
     return bull, bear, notes
 
 
@@ -223,6 +230,79 @@ def load_names():
     return n2c, keys
 
 
+_AI_SYS = ("你是 A 股短线复盘助手。给定若干净化后的预案文本片段（可能含 OCR 错字）与候选股票名，"
+           "判断每个片段里被点名的股票是【看多】【看空】还是【仅提及】。"
+           "规则：出现 低吸/参与/做T/卡位/关注/博弈/上车/仓位/晋级/先手/弹性 等→看多；"
+           "出现 回避/断板/走人/卖点/放弃/减仓/兑现/不参与/控仓/无持续性 等→看空；"
+           "仅描述事实（几板、题材、涨跌）没有动作词→仅提及。"
+           "只允许从候选名里选，不得臆造。严格输出 JSON："
+           '{"decisions":[{"i":行号,"name":"候选名","polarity":"bull|bear|mention","reason":"不超过20字"}]}')
+
+
+def _ai_cache_load():
+    try:
+        return json.load(open(AI_CACHE, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _ai_cache_save(c):
+    os.makedirs(os.path.dirname(AI_CACHE), exist_ok=True)
+    try:
+        json.dump(c, open(AI_CACHE, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def ai_review(lines, n2c, keys, section_of=None):
+    """对「规则判为中性但出现候选名」的行做 LLM 复核。
+
+    lines: [(行号, 文本)]；返回 {行号: (name, polarity, reason)}
+    """
+    if not AI_ENABLED or not lines:
+        return {}
+    import hashlib
+    cands, packed = [], []
+    for i, text in lines:
+        hit = [nm for nm in keys if nm in text][:6]
+        if not hit:
+            continue
+        packed.append((i, text, hit))
+        for nm in hit:
+            if nm not in cands:
+                cands.append(nm)
+    if not packed:
+        return {}
+    cache = _ai_cache_load()
+    key = hashlib.sha1(json.dumps([t for _, t, _ in packed], ensure_ascii=False).encode()).hexdigest()[:16]
+    if key in cache:
+        return {int(k): tuple(v) for k, v in cache[key].items()}
+    user = json.dumps({
+        "候选名": cands[:40],
+        "片段": ["%d|%s" % (i, re.sub(r"\s+", " ", t)[:220]) for i, t, _ in packed],
+    }, ensure_ascii=False)
+    out, err = ai_client.chat_json(_AI_SYS, user, retries=1)
+    if not out:
+        log("AI_FAIL %s" % err)
+        return {}
+    res = {}
+    for d in out.get("decisions") or []:
+        try:
+            i = int(d.get("i"))
+        except Exception:
+            continue
+        nm = d.get("name") or ""
+        pol = d.get("polarity")
+        if nm not in n2c:
+            continue
+        res[i] = (nm, "bull" if pol == "bull" else ("bear" if pol == "bear" else "neutral"),
+                  d.get("reason") or "")
+    log("AI_OK 复核 %d 段 → 判定 %d 条" % (len(packed), len(res)))
+    cache[key] = {str(k): v for k, v in res.items()}
+    _ai_cache_save(cache)
+    return res
+
+
 def compute_layers(hn_bull, hn_bear, lq_bull, lq_bear):
     A = set(hn_bull) - set(hn_bear)
     lq_short = {c for c, x in lq_bull.items() if x.get("section") == "short"}
@@ -241,8 +321,10 @@ def explain_layers(hn_bull, hn_bear, lq_bull, lq_bear):
         snip = (hn_bull.get(c) or {}).get("snippet") or ""
         hit = next((w for w in REVERSE_WORDS if w in snip), "?")
         lqs = (lq_bear.get(c) or {}).get("snippet") or ""
-        out.append("L3 %s %s | 红牛:看多·命中反核词「%s」 | 来去:空头风标·%s"
-                   % (c, (hn_bull.get(c) or {}).get("name", ""), hit, _flat(lqs, 30)))
+        out.append("L3 %s %s | 红牛:看多(%s)·命中反核词「%s」 | 来去:空头风标(%s)·%s"
+                   % (c, (hn_bull.get(c) or {}).get("name", ""),
+                      (hn_bull.get(c) or {}).get("src", "rule"), hit,
+                      (lq_bear.get(c) or {}).get("src", "rule"), _flat(lqs, 30)))
     for c in sorted(L5):
         lqs = (lq_bull.get(c) or {}).get("snippet") or ""
         out.append("L5 %s %s | 红牛:看多 | 来去:短线方面看多·%s"
@@ -286,6 +368,10 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear):
         lines.append("　→ 执行：**非一字或竞价额≥封单额×10%** 才买，持 3–5 日")
         lines.append("　→ 历史：可买子集 n=11，D+1 72.7% / D+5 +5.10%")
         lines.append("")
+    ai_cnt = sum(1 for d in (hn_bull, hn_bear, lq_bull, lq_bear)
+                 for v in d.values() if str(v.get("src", "")).startswith("ai"))
+    if ai_cnt:
+        lines.append("_（其中 %d 条由 AI 复核补充判定，规则层未决）_" % ai_cnt)
     lines.append("**红牛看多合计 %d 只**（L1 参考：n=124，D+1 62.9%%）" % len(A))
     return "\n".join(lines)
 
@@ -356,8 +442,24 @@ def once(dry_run=False, date=None):
     if not texts["hn"] or not texts["lq"]:
         log("预案未齐：红牛 %d 张 / 来去 %d 张" % (len(texts["hn"]), len(texts["lq"])))
         return None
-    hn_bull, hn_bear, _ = parse_plans(texts["hn"], (n2c, keys))
-    lq_bull, lq_bear, _ = parse_plans(texts["lq"], (n2c, keys))
+    hn_bull, hn_bear, hn_notes = parse_plans(texts["hn"], (n2c, keys))
+    lq_bull, lq_bear, lq_notes = parse_plans(texts["lq"], (n2c, keys))
+    if AI_ENABLED:
+        for tag, bull, bear, notes in (("红牛", hn_bull, hn_bear, hn_notes),
+                                       ("来去", lq_bull, lq_bear, lq_notes)):
+            lines = [(i, n["line"]) for i, n in enumerate(notes)]
+            ai = ai_review(lines, n2c, keys)
+            for i, (nm, pol, why) in ai.items():
+                sec = notes[i]["section"]
+                code = n2c[nm]
+                if code in bull or code in bear:
+                    continue
+                if pol == "bull":
+                    bull[code] = {"name": nm, "section": sec, "snippet": notes[i]["line"][:60],
+                                  "src": "ai:" + why[:16]}
+                elif pol == "bear":
+                    bear[code] = {"name": nm, "section": sec, "snippet": notes[i]["line"][:60],
+                                  "src": "ai:" + why[:16]}
     log("解析：红牛 多%d/空%d，来去 多%d/空%d" % (len(hn_bull), len(hn_bear), len(lq_bull), len(lq_bear)))
     for line in explain_layers(hn_bull, hn_bear, lq_bull, lq_bear):
         log("  证据 " + line)
