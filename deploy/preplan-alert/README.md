@@ -40,3 +40,27 @@ grep WEBHOOK logs/preplan_alert.log | tail -5
 - `data/laiqiu/` 与 `config.json` 在 .gitignore 里，所以字典文件放在 `deploy/preplan-alert/stockdict_ak.json`，由 install.sh 复制到位
 - webhook 不写进仓库（避免泄露），沿用服务器上已有的 `config.json`
 - 服务器时区必须是 `Asia/Shanghai`，否则 08:30 会错位：`timedatectl set-timezone Asia/Shanghai`
+
+## 六、可选：云端 LLM 兜底（2026-10-27 已上线）
+
+规则层是主判定（词表 + 股票名单，确定性），云端 LLM 只在**规则判为"未决"的句子**上兜底：
+
+| 项 | 说明 |
+|---|---|
+| 开关 | 环境变量 `PREPLAN_AI=1`（cron 里已加） |
+| 模型 | DeepSeek（OpenAI 兼容），配置写在 `config.json` 的 `ai` 段：`base_url / api_key / model / timeout` |
+| 调用粒度 | **每份预案 1 次**，把该份里所有"未决句"打包成一次请求 |
+| 输入限制 | 只把**候选股票名**（规则从文本里捞出的）+ 句子给模型，禁止它臆造名单外的票 |
+| 输出 | 严格 JSON：`{"decisions":[{"i":行号,"name":"","polarity":"bull|bear|mention","reason":""}]}` |
+| 合并策略 | AI 只能**补**规则判 neutral 的票；规则已判定的不覆盖；冲突只记日志 |
+| 缓存 | `data/feishu/ai_cache.json`，同一段文本不重复调用 |
+| 降级 | key 缺失/超时/坏 JSON → 记 `AI_FAIL`，**照旧用规则结果推送** |
+| 成本 | 每天 2–4 次调用、约 2–4k tokens，按 DeepSeek 价格约 ¥0.01–0.03/天 |
+
+关闭方式：把 cron 里的 `PREPLAN_AI=1` 去掉即可，脚本会完全回到纯规则。
+
+证据日志（`logs/preplan_alert.log`）会标出来源：
+```
+证据 L3 600178 东安动力 | 红牛:看多(rule)·命中反核词「次弱」 | 来去:空头风标(rule)·…
+证据 L5 ... | 红牛:看多(ai:看能否一进二) | 来去:短线方面看多(rule)·…
+```
