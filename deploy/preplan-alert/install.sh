@@ -10,7 +10,12 @@ VENV="${VENV:-/root/venv}"
 echo "仓库: $REPO_ROOT"
 echo "venv: $VENV"
 
-echo "== 1. Python 依赖 =="
+echo "== 1. 系统依赖（opencv 需要 libGL） =="
+if command -v apt-get >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libgl1 libglib2.0-0 >/dev/null 2>&1 || true
+fi
+
+echo "== 1b. Python 依赖 =="
 if [ ! -x "$VENV/bin/python" ]; then
   python3 -m venv "$VENV"
 fi
