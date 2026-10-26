@@ -233,6 +233,23 @@ def compute_layers(hn_bull, hn_bear, lq_bull, lq_bear):
     return A, L3, L5
 
 
+def explain_layers(hn_bull, hn_bear, lq_bull, lq_bear):
+    """输出每条 L3/L5 的判定证据（纯规则，便于事后核对）"""
+    A, L3, L5 = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear)
+    out = []
+    for c in sorted(L3):
+        snip = (hn_bull.get(c) or {}).get("snippet") or ""
+        hit = next((w for w in REVERSE_WORDS if w in snip), "?")
+        lqs = (lq_bear.get(c) or {}).get("snippet") or ""
+        out.append("L3 %s %s | 红牛:看多·命中反核词「%s」 | 来去:空头风标·%s"
+                   % (c, (hn_bull.get(c) or {}).get("name", ""), hit, _flat(lqs, 30)))
+    for c in sorted(L5):
+        lqs = (lq_bull.get(c) or {}).get("snippet") or ""
+        out.append("L5 %s %s | 红牛:看多 | 来去:短线方面看多·%s"
+                   % (c, (lq_bull.get(c) or {}).get("name", ""), _flat(lqs, 30)))
+    return out
+
+
 def _flat(x, n=40):
     return re.sub(r"\s+", " ", (x or "")).strip()[:n]
 
@@ -342,6 +359,8 @@ def once(dry_run=False, date=None):
     hn_bull, hn_bear, _ = parse_plans(texts["hn"], (n2c, keys))
     lq_bull, lq_bear, _ = parse_plans(texts["lq"], (n2c, keys))
     log("解析：红牛 多%d/空%d，来去 多%d/空%d" % (len(hn_bull), len(hn_bear), len(lq_bull), len(lq_bear)))
+    for line in explain_layers(hn_bull, hn_bear, lq_bull, lq_bear):
+        log("  证据 " + line)
     md = build_message(today, hn_bull, hn_bear, lq_bull, lq_bear)
     if not md:
         log("当日无 L3/L5 信号")
