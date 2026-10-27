@@ -906,11 +906,12 @@ def once(dry_run=False, date=None, send=True):
     added = [x["code"] for x in items if x["code"] not in pushed]
     now_hm = datetime.now().strftime("%H:%M")
     last_ts = st_l1.get("l1_last_ts") or ""
-    final_at = os.environ.get("L1_FINAL_AT", "09:10")
+    final_at = os.environ.get("L1_FINAL_AT", "09:00")
     ver = int(st_l1.get("l1_ver") or 0)
     do_final = bool(items) and now_hm >= final_at and not st_l1.get("l1_final")
+    incremental = os.environ.get("L1_INCREMENTAL", "0").strip() in ("1", "true", "yes")
     gap_ok = (not last_ts) or (time.time() - float(last_ts) > 90)
-    if (added or do_final) and gap_ok:
+    if (do_final or (incremental and added)) and gap_ok:
         ver += 1
         if send_l1_update(today, items, added, ver, final=do_final):
             st_l1.update({"l1_ver": ver, "l1_pushed": sorted(set(pushed) | set(x["code"] for x in items)),
@@ -992,9 +993,10 @@ def main():
     ap.add_argument("--date", default="")
     ap.add_argument("--test-send", action="store_true")
     ap.add_argument("--no-send", action="store_true")
-    ap.add_argument("--interval", type=int, default=60)
+    ap.add_argument("--interval", type=int, default=300, help="平时轮询间隔秒（09:20 后自动 30s）")
     ap.add_argument("--until", default="09:30")
-    ap.add_argument("--l1-final", default="09:10", help="L1 定稿推送时间（默认 09:10）")
+    ap.add_argument("--l1-final", default="09:00", help="L1 定稿推送时间（默认 09:00）")
+    ap.add_argument("--l1-incremental", action="store_true", help="预案到一条推一条（默认只在定稿时推一次）")
     a = ap.parse_args()
 
     if a.test_send:
@@ -1008,9 +1010,12 @@ def main():
         return
     if a.loop:
         os.environ.setdefault("L1_FINAL_AT", a.l1_final)
+        if a.l1_incremental:
+            os.environ["L1_INCREMENTAL"] = "1"
         hh, mm = map(int, a.until.split(":"))
         deadline = datetime.now().replace(hour=hh, minute=mm, second=0, microsecond=0)
-        log("开始监听（每 %ds，截止 %s）" % (a.interval, a.until))
+        log("开始监听（平时每 %ds，09:20 后每 30s，截止 %s）｜L1 定稿 %s｜增量推送 %s"
+            % (a.interval, a.until, a.l1_final, "开" if a.l1_incremental else "关"))
         auction_done = False
         while datetime.now() < deadline:
             try:
@@ -1025,7 +1030,9 @@ def main():
                         json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
             except Exception as e:
                 log("ERR %s" % str(e)[:200])
-            time.sleep(a.interval)
+            # 09:20 后加密轮询，保证 09:26 竞价定档准时
+            iv = 30 if datetime.now().strftime("%H:%M") >= "09:20" else a.interval
+            time.sleep(iv)
         log("监听结束")
         today = datetime.now().strftime("%Y-%m-%d")
         st = last_run_summary()
