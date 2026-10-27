@@ -17,6 +17,7 @@ import argparse
 import collections
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -142,29 +143,53 @@ def backtest(stop=0.05, half=True, remain_offset=1, capital=10000.0):
     return res
 
 
+def _curl(url, timeout=10):
+    try:
+        pr = subprocess.run(["curl", "-s", "-m", str(timeout), "-A", "Mozilla/5.0", url],
+                            capture_output=True)
+        return pr.stdout
+    except Exception:
+        return b""
+
+
 def quotes(codes):
-    """取实时/收盘行情：竞价撮合价 f46 与昨收 f60（东财接口，字段需 /100）"""
+    """竞价/开盘价 + 昨收：优先腾讯 qt.gtimg.cn（GBK，可批量），兜底东财。
+    返回 {code: {name, open, prev, gap%}}
+    """
     out = {}
+    syms = []
     for c in codes:
-        secid = ("1." if str(c).startswith(("6", "9")) else ("0." if str(c).startswith(("0", "3")) else "0.")) + str(c)
-        url = ("https://push2.eastmoney.com/api/qt/stock/get?secid=%s&fields=f43,f46,f60,f57,f58" % secid)
+        c = str(c).zfill(6)
+        syms.append(("sh" if c.startswith(("6", "9")) else
+                     ("bj" if c.startswith(("4", "8", "92")) else "sz")) + c)
+    raw = _curl("https://qt.gtimg.cn/q=" + ",".join(syms))
+    try:
+        text = raw.decode("gbk", "replace")
+    except Exception:
+        text = ""
+    for m in re.finditer(r'v_(s[hz]\d{6})="([^"]*)"', text):
+        parts = m.group(2).split("~")
+        if len(parts) < 6:
+            continue
         try:
-            raw = None
-            try:      # 优先 curl（服务器上 urllib 常被代理/UA 拦掉）
-                pr = subprocess.run(["curl", "-s", "-m", "10", "-A", "Mozilla/5.0", url],
-                                    capture_output=True)
-                raw = pr.stdout.decode("utf-8", "replace")
-            except Exception:
-                raw = None
-            if not raw:
-                with urllib.request.urlopen(url, timeout=10) as r:
-                    raw = r.read().decode("utf-8")
-            d = json.loads(raw).get("data") or {}
+            name, code, prev, op = parts[1], parts[2], float(parts[4]), float(parts[5])
+        except ValueError:
+            continue
+        if op > 0 and prev > 0:
+            out[code] = {"name": name, "open": op, "prev": prev,
+                         "gap": round(100 * (op / prev - 1), 2)}
+    # 兜底：东财单只
+    missing = [c for c in codes if str(c).zfill(6) not in out]
+    for c in missing:
+        c = str(c).zfill(6)
+        secid = ("1." if c.startswith(("6", "9")) else "0.") + c
+        r2 = _curl("https://push2.eastmoney.com/api/qt/stock/get?secid=%s&fields=f46,f60,f58" % secid)
+        try:
+            d = json.loads(r2.decode("utf-8", "replace")).get("data") or {}
             op, prev = d.get("f46"), d.get("f60")
-            if op and op > 0 and prev and prev > 0:
-                out[str(c)] = {"name": d.get("f58"), "open": op / 100.0,
-                               "prev": prev / 100.0,
-                               "gap": round(100 * (op / prev - 1), 2)}
+            if op and prev and op > 0 and prev > 0:
+                out[c] = {"name": d.get("f58"), "open": op / 100.0, "prev": prev / 100.0,
+                          "gap": round(100 * (op / prev - 1), 2)}
         except Exception:
             continue
     return out
