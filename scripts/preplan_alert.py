@@ -509,7 +509,7 @@ def compute_layers(hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
 
 
 def explain_layers(hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
-    """输出每条 L3/L5 的判定证据（纯规则，便于事后核对）"""
+    """输出每条 L3 的判定证据（纯规则，便于事后核对；L5 已下线）"""
     A, L3, L5 = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear, fk_bear)
     out = []
     for c in sorted(L3):
@@ -913,7 +913,7 @@ def once(dry_run=False, date=None, send=True):
             elif x["polarity"] == "bear":
                 hn_bear[x["code"]] = rec
         md = build_message(date, hn_bull, hn_bear, lq_bull, lq_bear)
-        print(md or "(当日无 L3/L5 信号)")
+        print(md or "(当日无 L3 信号)")
         if md and not dry_run:
             send_feishu(md)
         return md
@@ -1024,7 +1024,7 @@ def once(dry_run=False, date=None, send=True):
         log("  证据 " + line)
     md = build_message(today, hn_bull, hn_bear, lq_bull, lq_bear, lq_fk["bear"])
     if not md:
-        log("当日无 L3/L5 信号")
+        log("当日无 L3 信号（L1 定稿已单独推送）")
         return None
     st = {}
     if os.path.isfile(STATE):
@@ -1065,7 +1065,7 @@ def main():
     a = ap.parse_args()
 
     if a.test_send:
-        send_feishu("**测试** 预案 L3/L5 预警通道正常 ✅")
+        send_feishu("**测试** 预案预警通道正常 ✅" + chr(10) + "（L1 定稿 + L3 预警 + 竞价排名）")
         return
     if a.dry_run:
         once(dry_run=True, date=a.date or datetime.now().strftime("%Y-%m-%d"))
