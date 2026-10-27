@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""盘前预案 L3/L5 预警：监听红牛一号 + 来去由心 的当日预案，出现信号立即飞书推送。
+"""盘前预案预警：监听红牛一号 + 来去由心 的当日预案，推送 L1（红牛看多）+ L3（超跌反核）。
 
 用法
     python scripts/preplan_alert.py --once              # 跑一次检查（可用于测试）
@@ -12,9 +12,9 @@
   2) 分别解析：红牛 → bull/bear；来去由心 → 具体机会解析各段（短线/题材/趋势）bull/bear
   3) 两边都拿到当日预案后计算：
        L3 = 红牛看多 ∩ 来去看空(空头风标) ∩ 红牛原文含"反核/次弱/地板/跌停开/低吸/反包"
-       L5 = 红牛看多 ∩ 来去【短线方面】看多
+       L5 = 红牛看多 ∩ 来去【短线方面】看多（2026-10-27 已下线，见 reports/L5回测_20261027.md）
        L1 = 红牛看多（仅统计用）
-  4) 有 L3/L5 就发飞书（默认发到「量化系统通知」群），并写状态避免重复推送
+  4) 09:00 推 L1 定稿、09:26 推竞价排名；有 L3 时在两条里标 🔴L3
 """
 import argparse
 import io
@@ -541,7 +541,7 @@ def fmt_list(codes, bull, lq_bull, lq_bear):
 
 def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
     A, L3, L5 = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear, fk_bear)
-    if not A:
+    if not A and not L3:
         return None
     lines = ["**%s 预案信号预警**" % date, ""]
     # ---- L1：红牛预案看多主清单 ----
@@ -551,11 +551,9 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
         tag = ""
         if c in L3:
             tag = " 🔴L3"
-        elif c in L5:
-            tag = " 🟡L5"
         tt = tier_tag((hn_bull.get(c) or {}).get("snippet", ""))
         lines.append("　· %s(%s) [%s]%s" % (nm, c, tt, tag))
-    lines.append("　→ 执行：**09:25 竞价后选涨幅最高的一只，开盘满仓**；D+1 收盘卖（隔日卖）")
+    lines.append("　→ 09:25 竞价结束后会再推一条「竞价排名」（涨幅/金额/换手），自行决定买哪只")
     lines.append("　→ 历史（T+1 合规，56 笔）：1 万 → 6.49 万 / **+548.6%** / 胜率 62.5% / 回撤 -19.4%")
     lines.append("")
     if L3:
@@ -570,15 +568,9 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
         lines.append("　→ 剩余：每日新高才持有，不新高当日收盘清；D+3 再卖 1/2；D+5 尾盘清")
         lines.append("　→ 历史（满仓复利/未计费）：23 笔，+378.6%，最大回撤 -14.3%，胜率 60.9%")
         lines.append("")
-    if L5:
-        lines.append("🟡 **L5 短线接力**")
-        for c in sorted(L5, key=lambda x: full_name(x, x)):
-            nm = full_name(c, (lq_bull.get(c) or {}).get("name", c))
-            lq_s = (lq_bull.get(c) or {}).get("snippet") or ""
-            lines.append("　· %s(%s)｜来去：%s" % (nm, c, _flat(lq_s, 44)))
-        lines.append("　→ 执行：**非一字或竞价额≥封单额×10%** 才买，持 3–5 日")
-        lines.append("　→ 历史：可买子集 n=11，D+1 72.7% / D+5 +5.10%")
-        lines.append("")
+    # L5 已下线（2026-10-27）：严格定义全年仅 5 个信号、可买 2 笔，
+    # 放宽后 D+1 +7.3% 但 D+3 -6.0% / D+5 -47.9%，胜率与 L1 无差异，不构成独立策略。
+    # 详见 reports/L5回测_20261027.md
     ai_cnt = sum(1 for d in (hn_bull, hn_bear, lq_bull, lq_bear)
                  for v in d.values() if str(v.get("src", "")).startswith("ai"))
     if ai_cnt:
@@ -833,13 +825,13 @@ def send_fallback(date, summary):
     lines = ["**%s 预案预警（兜底提醒）**" % date, ""]
     hn, lq = summary.get("hn", {}), summary.get("lq", {})
     if not summary.get("both"):
-        lines.append("⚠️ **两家预案没凑齐，今天没做 L3/L5 判断**")
+        lines.append("⚠️ **两家预案没凑齐，今天没做 L3 判断**")
         lines.append("　红牛：消息 %s 条 / 预案段 %s" % (hn.get("msgs", 0), hn.get("plans", 0)))
         lines.append("　来去：消息 %s 条 / 预案段 %s" % (lq.get("msgs", 0), lq.get("plans", 0)))
         lines.append("　可能原因：预案改成了新格式（非图片/非标准文本）、群消息被撤、或发送时间晚于 09:20")
         lines.append("　→ 请顺手看一眼两个群，我按需调整解析规则")
     else:
-        lines.append("两家预案已解析成功，但**今天没有 L3/L5 信号**")
+        lines.append("两家预案已解析成功，但**今天没有 L3 信号**（L1 清单见 09:00 定稿）")
         lines.append("　红牛 多%s / 空%s；来去 多%s / 空%s（风标 空%s）"
                      % (hn.get("bull", 0), hn.get("bear", 0), lq.get("bull", 0), lq.get("bear", 0),
                         summary.get("fk_bear", 0)))
@@ -980,7 +972,7 @@ def once(dry_run=False, date=None, send=True):
                   "tier": tier_tag((hn_bull.get(c) or {}).get("snippet", "")),
                   "hn": (hn_bull.get(c) or {}).get("snippet", "")[:50]}
                  for c in sorted(L1_set)]
-    log("候选：L1 %d 只 / L3 %d 只 / L5 %d 只" % (len(L1_set), len(L3_set), len(_L5)))
+    log("候选：L1 %d 只 / L3 %d 只（L5 已下线）" % (len(L1_set), len(L3_set)))
     st1.update({"hn": {"msgs": stat["hn"]["msgs"], "plans": len(texts["hn"]),
                        "bull": len(hn_bull), "bear": len(hn_bear)},
                 "lq": {"msgs": stat["lq"]["msgs"], "plans": len(texts["lq"]),
