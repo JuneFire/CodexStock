@@ -506,9 +506,22 @@ def fmt_list(codes, bull, lq_bull, lq_bear):
 
 def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
     A, L3, L5 = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear, fk_bear)
-    if not L3 and not L5:
+    if not A:
         return None
     lines = ["**%s 预案信号预警**" % date, ""]
+    # ---- L1：红牛预案看多主清单 ----
+    lines.append("📋 **L1 红牛预案看多（%d 只）**" % len(A))
+    for c in sorted(A, key=lambda x: (hn_bull.get(x) or {}).get("name", "")):
+        nm = (hn_bull.get(c) or {}).get("name", c)
+        tag = ""
+        if c in L3:
+            tag = " 🔴L3"
+        elif c in L5:
+            tag = " 🟡L5"
+        lines.append("　· %s(%s)%s" % (nm, c, tag))
+    lines.append("　→ 执行：**09:25 竞价后选涨幅最高的一只，开盘满仓**；D+1 收盘卖（隔日卖）")
+    lines.append("　→ 历史（T+1 合规，56 笔）：1 万 → 6.49 万 / **+548.6%** / 胜率 62.5% / 回撤 -19.4%")
+    lines.append("")
     if L3:
         lines.append("🔴 **L3 超跌反核（重点）**")
         lines.append("　" + fmt_list(L3, hn_bull, lq_bull, lq_bear))
@@ -590,27 +603,48 @@ def last_run_summary():
         return {}
 
 
-def send_auction(date, cands):
-    """09:26 竞价结束后，按竞价涨幅排序并给出该买哪只 + 卖点计划"""
-    q = l3_strategy.quotes([x["code"] for x in cands])
-    for x in cands:
-        x.update(q.get(x["code"], {}))
-    cands = [x for x in cands if x.get("gap") is not None]
-    if not cands:
-        log("竞价数据取不到，跳过排序推送")
+def send_auction(date, l3_cands, l1_cands):
+    """09:26 竞价定档：分别对 L3 / L1 排序，给出该买哪只 + 卖点计划（L3 优先）"""
+    allx = list(l3_cands) + [x for x in l1_cands if x["code"] not in {y["code"] for y in l3_cands}]
+    if not allx:
         return False
-    cands.sort(key=lambda x: -x["gap"])
-    best = cands[0]
-    lines = ["**%s L3 竞价排序（09:25 定档）**" % date, ""]
-    for i, x in enumerate(cands, 1):
-        mark = "👉 " if i == 1 else "　　"
-        lines.append("%s%d. %s(%s) 竞价 **%+.2f%%**" % (mark, i, x["name"], x["code"], x["gap"]))
-        lines.append("　　　红牛：%s" % (x.get("hn") or "")[:46])
-    lines.append("")
-    lines.append("**→ 按规则买：%s(%s)**（满仓单票）" % (best["name"], best["code"]))
-    lines.append("　· 止损：D+1 盘中跌破成本 -5% 即卖（T+1，当天不能卖）")
-    lines.append("　· 出场：D+1 收盘卖**半仓**，剩余半仓 D+2 收盘卖")
-    lines.append("　· 历史（23 笔）：期末 4.11 万 / +310.6% / 胜率 65.2% / 最大回撤 -9.7%")
+    q = l3_strategy.quotes([x["code"] for x in allx])
+    for x in allx:
+        x.update(q.get(x["code"], {}))
+
+    def rank(lst):
+        v = [x for x in lst if x.get("gap") is not None]
+        return sorted(v, key=lambda z: -z["gap"])
+
+    L3 = rank(l3_cands)
+    L1 = rank(l1_cands)
+    lines = ["**%s 竞价定档（09:25）**" % date, ""]
+    if L3:
+        lines.append("🔴 **L3 超跌反核（优先）**")
+        for i, x in enumerate(L3, 1):
+            lines.append("%s%d. %s(%s) 竞价 **%+.2f%%**" % ("👉 " if i == 1 else "　　", i,
+                                                        x["name"], x["code"], x["gap"]))
+        lines.append("")
+    if L1:
+        lines.append("📋 **L1 红牛看多（%d 只，按竞价排序）**" % len(L1))
+        for i, x in enumerate(L1[:10], 1):
+            lines.append("%s%d. %s(%s) **%+.2f%%**" % ("👉 " if (i == 1 and not L3) else "　　",
+                                                     i, x["name"], x["code"], x["gap"]))
+        if len(L1) > 10:
+            lines.append("　　…另有 %d 只" % (len(L1) - 10))
+        lines.append("")
+    if L3:
+        best = L3[0]
+        lines.append("**→ 今日买：%s(%s)** —— L3 优先（满仓单票）" % (best["name"], best["code"]))
+        lines.append("　· 止损：D+1 盘中跌破成本 -5% 即卖（T+1 当天不能卖）")
+        lines.append("　· 出场：D+1 收盘卖半仓，剩余半仓 D+2 收盘卖")
+        lines.append("　· 历史（23 笔）：+310.6% / 胜率 65.2% / 回撤 -9.7%")
+    elif L1:
+        best = L1[0]
+        lines.append("**→ 今日买：%s(%s)** —— 无 L3，用 L1（满仓单票）" % (best["name"], best["code"]))
+        lines.append("　· 出场：**D+1 收盘全出**（隔日卖，T+1 合规）")
+        lines.append("　· 可选止损：D+1 盘中跌破成本 -5% 即卖")
+        lines.append("　· 历史（56 笔）：+548.6% / 胜率 62.5% / 回撤 -19.4%")
     return send_feishu(chr(10).join(lines))
 
 
@@ -722,6 +756,11 @@ def once(dry_run=False, date=None, send=True):
     st1["L3"] = [{"code": c, "name": (hn_bull.get(c) or {}).get("name", c),
                   "gap": None, "hn": (hn_bull.get(c) or {}).get("snippet", "")[:50]}
                  for c in sorted(L3_set)]
+    L1_set = set(hn_bull) - set(hn_bear)
+    st1["L1"] = [{"code": c, "name": (hn_bull.get(c) or {}).get("name", c),
+                  "gap": None, "hn": (hn_bull.get(c) or {}).get("snippet", "")[:50]}
+                 for c in sorted(L1_set)]
+    log("候选：L1 %d 只 / L3 %d 只 / L5 %d 只" % (len(L1_set), len(L3_set), len(_L5)))
     st1.update({"hn": {"msgs": stat["hn"]["msgs"], "plans": len(texts["hn"]),
                        "bull": len(hn_bull), "bear": len(hn_bear)},
                 "lq": {"msgs": stat["lq"]["msgs"], "plans": len(texts["lq"]),
@@ -783,9 +822,9 @@ def main():
                 once()
                 st = last_run_summary()
                 if (not auction_done and st.get("date") == datetime.now().strftime("%Y-%m-%d")
-                        and st.get("L3") and datetime.now().strftime("%H:%M") >= "09:26"):
-                    log("竞价排序推送（%d 只候选）" % len(st["L3"]))
-                    if send_auction(st["date"], list(st["L3"])):
+                        and (st.get("L3") or st.get("L1")) and datetime.now().strftime("%H:%M") >= "09:26"):
+                    log("竞价定档推送（L3 %d 只 / L1 %d 只）" % (len(st.get("L3") or []), len(st.get("L1") or [])))
+                    if send_auction(st["date"], list(st.get("L3") or []), list(st.get("L1") or [])):
                         auction_done = True
                         st["auction_sent"] = True
                         json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
