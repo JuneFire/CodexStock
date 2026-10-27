@@ -76,8 +76,15 @@ def sh(args, timeout=90):
     return r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"), r.returncode
 
 
+def _lark_cmd():
+    """Windows 用 node + 本地 run.js；Linux 服务器直接用 lark-cli 可执行文件"""
+    if os.path.isfile(RUN):
+        return ["node", RUN]
+    return ["lark-cli"]
+
+
 def lark(*args, timeout=90):
-    out, err, rc = sh(["node", RUN] + list(args), timeout=timeout)
+    out, err, rc = sh(_lark_cmd() + list(args), timeout=timeout)
     try:
         return json.loads(out)
     except Exception:
