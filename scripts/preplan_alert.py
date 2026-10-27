@@ -540,42 +540,31 @@ def fmt_list(codes, bull, lq_bull, lq_bear):
 
 
 def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
+    """只负责 **L3 预警**（L1 清单由 send_l1_update 单独推送，避免重复内容）"""
     A, L3, L5 = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear, fk_bear)
-    if not A and not L3:
+    if not L3:
         return None
-    lines = ["**%s 预案信号预警**" % date, ""]
-    # ---- L1：红牛预案看多主清单 ----
-    lines.append("📋 **L1 红牛预案看多（%d 只）**" % len(A))
-    for c in sorted(A, key=lambda x: full_name(x, (hn_bull.get(x) or {}).get("name", ""))):
+    lines = ["**%s L3 超跌反核预警**" % date, ""]
+    lines.append("🔴 **L3 触发 %d 只（红牛看多 × 来去看空）**" % len(L3))
+    for c in sorted(L3, key=lambda x: full_name(x, x)):
         nm = full_name(c, (hn_bull.get(c) or {}).get("name", c))
-        tag = ""
-        if c in L3:
-            tag = " 🔴L3"
-        tt = tier_tag((hn_bull.get(c) or {}).get("snippet", ""))
-        lines.append("　· %s(%s) [%s]%s" % (nm, c, tt, tag))
-    lines.append("　→ 09:25 竞价结束后会再推一条「竞价排名」（涨幅/金额/换手），自行决定买哪只")
-    lines.append("　→ 历史（T+1 合规，56 笔）：1 万 → 6.49 万 / **+548.6%** / 胜率 62.5% / 回撤 -19.4%")
+        lines.append("　· %s(%s)" % (nm, c))
+        hn_s = (hn_bull.get(c) or {}).get("snippet") or ""
+        lq_s = (lq_bear.get(c) or {}).get("snippet") or ""
+        lines.append("　　　红牛：%s" % _flat(hn_s, 46))
+        lines.append("　　　来去：%s" % _flat(lq_s, 40))
     lines.append("")
-    if L3:
-        lines.append("🔴 **L3 超跌反核（重点）**")
-        lines.append("　" + fmt_list(L3, hn_bull, lq_bull, lq_bear))
-        for c in sorted(L3):
-            hn_s = (hn_bull.get(c) or {}).get("snippet") or ""
-            lq_s = (lq_bear.get(c) or {}).get("snippet") or ""
-            lines.append("　· %s｜红牛：%s｜来去：%s" % (c, _flat(hn_s, 42), _flat(lq_s, 36)))
-        lines.append("　→ 执行：**开盘全仓买入**；盘中跌破买入价 **-5%** 立即止损")
-        lines.append("　→ D+1 收绿（收盘<前收）清仓；收红尾盘卖 **1/3**")
-        lines.append("　→ 剩余：每日新高才持有，不新高当日收盘清；D+3 再卖 1/2；D+5 尾盘清")
-        lines.append("　→ 历史（满仓复利/未计费）：23 笔，+378.6%，最大回撤 -14.3%，胜率 60.9%")
-        lines.append("")
-    # L5 已下线（2026-10-27）：严格定义全年仅 5 个信号、可买 2 笔，
-    # 放宽后 D+1 +7.3% 但 D+3 -6.0% / D+5 -47.9%，胜率与 L1 无差异，不构成独立策略。
-    # 详见 reports/L5回测_20261027.md
+    lines.append("**执行（L3 定稿口径）**")
+    lines.append("　· 开盘买入；盘中跌破买入价 **-5%** 立即止损")
+    lines.append("　· D+1 收盘卖 **半仓**，剩余半仓 D+2 收盘卖")
+    lines.append("　· 历史（满仓复利/未计费）：23 笔 +283.9%｜胜率 60.9%｜回撤 -10.1%")
+    lines.append("　· 与 L1 合并（有 L3 就做 L3）：52 笔 +1016.1%｜胜率 69.2%｜回撤 -14.3%")
     ai_cnt = sum(1 for d in (hn_bull, hn_bear, lq_bull, lq_bear)
                  for v in d.values() if str(v.get("src", "")).startswith("ai"))
     if ai_cnt:
-        lines.append("_（其中 %d 条由 AI 复核补充判定，规则层未决）_" % ai_cnt)
-    return "\n".join(lines)
+        lines.append("")
+        lines.append("_（其中 %d 条由 AI 复核补充判定）_" % ai_cnt)
+    return chr(10).join(lines)
 
 
 def collect_side(chat_id, date, tag):
@@ -992,14 +981,18 @@ def once(dry_run=False, date=None, send=True):
             st = json.load(open(STATE, encoding="utf-8"))
         except Exception:
             st = {}
-    if st.get("date") == today and st.get("sent_hash") == hash(md):
+    import hashlib as _h
+    md_hash = _h.sha1(md.encode("utf-8")).hexdigest()[:16]
+    if st.get("date") == today and st.get("sent_hash") == md_hash:
         log("已推送过，跳过")
         return md
     if not send:
         log("（--no-send）不推送，仅输出")
         return md
     if send_feishu(md):
-        json.dump({"date": today, "sent_hash": hash(md)}, open(STATE, "w", encoding="utf-8"))
+        st["date"] = today
+        st["sent_hash"] = md_hash
+        json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
     return md
 
 
@@ -1015,6 +1008,7 @@ def main():
     ap.add_argument("--until", default="09:30")
     ap.add_argument("--l1-final", default="09:00", help="L1 定稿推送时间（默认 09:00）")
     ap.add_argument("--l1-incremental", action="store_true", help="预案到一条推一条（默认只在定稿时推一次）")
+    ap.add_argument("--auction-now", action="store_true", help="立即发一次竞价排名（09:26 兜底）")
     ap.add_argument("--sort", default="gap", choices=["gap", "amt", "turn"], help="竞价排名排序依据")
     a = ap.parse_args()
 
@@ -1026,6 +1020,20 @@ def main():
         return
     if a.once:
         once(send=not a.no_send)
+        return
+    if a.auction_now:
+        st = last_run_summary()
+        today = datetime.now().strftime("%Y-%m-%d")
+        if st.get("date") != today or st.get("auction_sent"):
+            log("竞价兜底：今日无候选或已推送，跳过")
+            return
+        if not st.get("L1") and not st.get("L3"):
+            log("竞价兜底：无候选，跳过")
+            return
+        if send_auction(today, list(st.get("L3") or []), list(st.get("L1") or []), sort_by=a.sort):
+            st["auction_sent"] = True
+            json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+            log("竞价兜底推送成功")
         return
     if a.loop:
         os.environ.setdefault("L1_FINAL_AT", a.l1_final)
