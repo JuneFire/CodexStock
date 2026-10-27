@@ -149,8 +149,17 @@ def quotes(codes):
         secid = ("1." if str(c).startswith(("6", "9")) else ("0." if str(c).startswith(("0", "3")) else "0.")) + str(c)
         url = ("https://push2.eastmoney.com/api/qt/stock/get?secid=%s&fields=f43,f46,f60,f57,f58" % secid)
         try:
-            with urllib.request.urlopen(url, timeout=10) as r:
-                d = json.loads(r.read().decode("utf-8")).get("data") or {}
+            raw = None
+            try:      # 优先 curl（服务器上 urllib 常被代理/UA 拦掉）
+                pr = subprocess.run(["curl", "-s", "-m", "10", "-A", "Mozilla/5.0", url],
+                                    capture_output=True)
+                raw = pr.stdout.decode("utf-8", "replace")
+            except Exception:
+                raw = None
+            if not raw:
+                with urllib.request.urlopen(url, timeout=10) as r:
+                    raw = r.read().decode("utf-8")
+            d = json.loads(raw).get("data") or {}
             op, prev = d.get("f46"), d.get("f60")
             if op and op > 0 and prev and prev > 0:
                 out[str(c)] = {"name": d.get("f58"), "open": op / 100.0,
