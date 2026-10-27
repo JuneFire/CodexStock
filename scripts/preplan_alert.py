@@ -582,7 +582,6 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
                  for v in d.values() if str(v.get("src", "")).startswith("ai"))
     if ai_cnt:
         lines.append("_（其中 %d 条由 AI 复核补充判定，规则层未决）_" % ai_cnt)
-    lines.append("**红牛看多合计 %d 只**（L1 参考：n=124，D+1 62.9%%）" % len(A))
     return "\n".join(lines)
 
 
