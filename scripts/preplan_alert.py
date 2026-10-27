@@ -725,6 +725,49 @@ def send_l1_update(date, items, added, version, final=False):
     return send_feishu(chr(10).join(lines))
 
 
+def preflight():
+    """07:00 自检：飞书读取 / AI / 行情 三项，任一失败用 webhook 告警（webhook 不依赖 lark token）"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    bad = []
+    # 1) 飞书读取
+    try:
+        msgs = messages_between(CHAT_HONGNIU, "%sT00:00:00+08:00" % today,
+                                datetime.now().strftime("%Y-%m-%dT%H:%M:%S+08:00"))
+        log("自检·飞书读取 OK（红牛今日 %d 条）" % len(msgs or []))
+    except Exception as e:
+        bad.append("飞书读取失败：%s" % str(e)[:80])
+    # 2) AI
+    try:
+        ok = ai_client.available()
+        if not ok:
+            bad.append("AI key 缺失")
+        else:
+            log("自检·AI key OK")
+    except Exception as e:
+        bad.append("AI 检查失败：%s" % str(e)[:60])
+    # 3) 行情
+    try:
+        q = l3_strategy.quotes(["600519"])
+        if not q:
+            bad.append("行情源取不到数据（腾讯 qt.gtimg.cn）")
+        else:
+            log("自检·行情 OK")
+    except Exception as e:
+        bad.append("行情失败：%s" % str(e)[:60])
+    if bad:
+        md = chr(10).join(["**⚠️ 预案预警自检失败（%s）**" % today, ""] +
+                          ["　· " + x for x in bad] +
+                          ["", "**修复方法**",
+                           "　· 飞书授权：在服务器执行 `lark-cli auth login`（或 `lark-cli auth status` 看 token 状态）",
+                           "　· token 有效期到 2026-11-03，到期后必须重新授权",
+                           "　· AI key：检查 config.json 的 ai.api_key"])
+        log("自检失败：%s" % "；".join(bad))
+        send_feishu(md)
+        return False
+    log("自检全部通过")
+    return True
+
+
 def last_run_summary():
     """读取当日最后一次采集摘要（兜底提醒用）"""
     try:
@@ -891,6 +934,14 @@ def once(dry_run=False, date=None, send=True):
            stat["lq"]["msgs"], stat["lq"]["texts"], stat["lq"]["imgs"], len(texts["lq"])))
     if not texts["hn"]:
         log("红牛预案还没来，等待")
+        stw = last_run_summary()
+        if (datetime.now().strftime("%H:%M") >= "08:40" and stw.get("date") == today
+                and not stw.get("fetch_warn") and st.get("hn", {}).get("msgs", 0) == 0):
+            stw["fetch_warn"] = True
+            json.dump(stw, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+            send_feishu("**⚠️ 红牛群读取异常**" + chr(10) + chr(10)
+                        + "到 %s 还没读到今日预案，可能是飞书授权失效。" % datetime.now().strftime("%H:%M")
+                        + chr(10) + "在服务器执行 `lark-cli auth status` 检查，必要时 `lark-cli auth login`。")
         return None
     hn_bull, hn_bear, hn_notes, hn_fk = parse_plans(texts["hn"], (n2c, keys))
     lq_bull, lq_bear, lq_notes, lq_fk = parse_plans(texts["lq"], (n2c, keys)) if texts["lq"] else ({}, {}, [], {"bull": {}, "bear": {}})
@@ -1008,6 +1059,7 @@ def main():
     ap.add_argument("--until", default="09:30")
     ap.add_argument("--l1-final", default="09:00", help="L1 定稿推送时间（默认 09:00）")
     ap.add_argument("--l1-incremental", action="store_true", help="预案到一条推一条（默认只在定稿时推一次）")
+    ap.add_argument("--preflight", action="store_true", help="07:00 自检（飞书/AI/行情）")
     ap.add_argument("--auction-now", action="store_true", help="立即发一次竞价排名（09:26 兜底）")
     ap.add_argument("--sort", default="gap", choices=["gap", "amt", "turn"], help="竞价排名排序依据")
     a = ap.parse_args()
@@ -1017,6 +1069,9 @@ def main():
         return
     if a.dry_run:
         once(dry_run=True, date=a.date or datetime.now().strftime("%Y-%m-%d"))
+        return
+    if a.preflight:
+        preflight()
         return
     if a.once:
         once(send=not a.no_send)
