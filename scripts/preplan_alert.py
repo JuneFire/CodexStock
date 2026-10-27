@@ -84,12 +84,52 @@ def lark(*args, timeout=90):
         return {"ok": False, "raw": out[:400], "err": err[:400], "rc": rc}
 
 
+def norm(text):
+    """统一清洗：去标签/零宽字符 + 反混淆（mǎi→买、bαn→板、苍→仓…）"""
+    return gs.clean(text or "")
+
+
 def recent_messages(chat_id, count=20):
     d = lark("im", "+chat-messages-list", "--chat-id", chat_id, "--page-size", str(count),
              "--order", "desc", "--no-reactions", "--format", "json", "--as", "user")
     msgs = ((d.get("data") or {}).get("messages") or [])
     msgs.sort(key=lambda m: m["create_time"])
     return msgs
+
+
+def messages_between(chat_id, start_iso, end_iso):
+    d = lark("im", "+chat-messages-list", "--chat-id", chat_id, "--page-size", "50",
+             "--order", "asc", "--start", start_iso, "--end", end_iso,
+             "--page-all", "--page-limit", "10", "--no-reactions",
+             "--format", "json", "--as", "user", timeout=180)
+    msgs = ((d.get("data") or {}).get("messages") or [])
+    msgs.sort(key=lambda m: m["create_time"])
+    return msgs
+
+
+PLAN_HINTS = ("预案", "策略", "短线方面", "具体机会解析", "大局观", "今日多头", "情绪：",
+              "题材：", "连板", "断板", "低吸", "反核")
+
+
+def looks_like_plan(text):
+    if len(text) < 80:
+        return False
+    hit = sum(1 for k in PLAN_HINTS if k in text)
+    return hit >= 2 or ("预案" in text) or ("策略" in text[:60])
+
+
+def ai_is_plan(text):
+    """AI 判定：这段是不是A股早盘预案/计划（只在启发式拿不准时调用）"""
+    if not AI_ENABLED:
+        return None
+    out, err = ai_client.chat_json(
+        "判断给定文本是不是A股「早盘预案/交易计划/复盘计划」（会给出第二天要参与的股票与方向）。"
+        '只输出 JSON：{"is_plan":true|false,"reason":"不超过15字"}',
+        text[:1200], retries=1, max_tokens=80)
+    if not out:
+        log("AI_PLAN_FAIL %s" % err)
+        return None
+    return bool(out.get("is_plan"))
 
 
 def download_image(msg, out):
@@ -119,6 +159,58 @@ def ocr_text(path):
         return ""
 
 
+CJK = re.compile(r"[一-鿿]")
+
+
+ACT_NEAR = ("竞价", "反核", "低吸", "买", "卖", "看", "板", "开", "走", "加", "减", "砸",
+            "断", "强", "弱", "卡", "吸", "打", "做", "兑", "仓", "分时", "预期")
+
+
+def _alias_ok(text, pos, ln):
+    """2 字简称（冰山冷热→冰山）容易误配，要求：右侧非汉字 / 或紧跟动作词 / 或左侧是标点"""
+    if ln > 2:
+        return True
+    end = pos + ln
+    if end >= len(text):
+        return True
+    if not CJK.match(text[end]):
+        return True
+    if any(w in text[end:end + 8] for w in ACT_NEAR):
+        return True
+    if pos == 0 or not CJK.match(text[pos - 1]):
+        return True
+    return False
+
+
+def name_positions(text, keys):
+    """返回 [(pos, len, name)]，按出现位置排序，用于推断"下一只票在哪"来截断窗口"""
+    out = []
+    for nm in keys:
+        for m in re.finditer(re.escape(nm), text):
+            if not _alias_ok(text, m.start(), len(nm)):
+                continue
+            out.append((m.start(), len(nm), nm))
+    out.sort()
+    return out
+
+
+def polarity_bounded(text, name, positions, maxlen=40):
+    """只看「名字之后、下一只票之前」的部分判极性（bear 优先）"""
+    hits = [p for p in positions if p[2] == name]
+    if not hits:
+        return "neutral", ""
+    for pos, ln, nm in hits:
+        end = pos + ln
+        nxt = next((p[0] for p in positions if p[0] > end), len(text))
+        ctx = text[end: min(end + maxlen, nxt)]
+        snip = text[max(0, pos - 6): min(end + maxlen, nxt)].replace(chr(10), " ")
+        if any(w in ctx for w in BEAR):
+            return "bear", snip
+        if any(w in ctx for w in BULL):
+            return "bull", snip
+    return "neutral", ""
+
+
 def polarity(text, names, forward=True):
     best = ("neutral", "")
     for a in names:
@@ -140,41 +232,94 @@ def parse_plans(texts, names_ctx):
     """texts: [(时间, 文本)]；返回 (bull, bear, notes)"""
     n2c, keys = names_ctx
     bull, bear, notes = {}, {}, []
+    fk = {"bull": {}, "bear": {}}
+    evid, code_of = {}, {}
     joined = "\n".join(t for _, t in texts)
     flat = "".join(t for _, t in texts)          # 去掉换行，抵消 OCR 折行
-    # 1) 风标句剔除（两头都适用）
-    feng = ""
-    for seg in re.split(chr(10) + "|[。；]", joined):
-        if any(k in seg for k in DEF_FENG) or ("多头" in seg and "空头" in seg):
-            feng += seg + "\n"
-    # 2) 分段（来去有段落；红牛没有则全部 other）
+    # 1b) 只保留「决策段」：从 具体机会解析/短线方面 起，到 总结/以上 止
+    #     （大局观/情绪段只是描述，同一只票在那里被提一次不代表方向）
+    _i = flat.find("具体机会解析")
+    if _i < 0:
+        for _mk in ("短线方面", "题材方面", "趋势票"):
+            _i = flat.find(_mk)
+            if _i >= 0:
+                break
+    if _i > 0:
+        flat = flat[_i:]
+        for _end in ("总结", "以上仅", "以上是"):
+            _j = flat.find(_end)
+            if _j > 0:
+                flat = flat[:_j]
+                break
+    positions = name_positions(flat, keys)        # 必须在裁剪之后算，否则索引错位
+    # 2) 分段：卡片类消息常常没有换行，长句再按 。；切分
+    raw_lines = re.split(chr(10), joined)
+    segs = []
+    for ln in raw_lines:
+        if len(ln) > 200:
+            segs.extend([x for x in re.split("[。；]", ln) if x.strip()])
+        else:
+            segs.append(ln)
     cur = "other"
-    for ln in re.split(chr(10), joined):
+    for ln in segs:
         s = ln.strip()
         if not s:
             continue
+        if any(k in s for k in DEF_FENG) or ("多头" in s and "空头" in s):
+            # 情绪风标句：不进 bull/bear，但「空头看」名单是 L3 的历史口径来源
+            kp = s.find("空头看")
+            for nm in [k for k in keys if k in s]:
+                if not _alias_ok(s, s.find(nm), len(nm)):
+                    continue
+                code = code_of.get(nm) or n2c.get(nm)
+                if not code:
+                    continue
+                pos = s.find(nm)
+                side = "bear" if (kp >= 0 and pos > kp) else "bull"
+                fk[side][code] = {"name": nm, "section": "fengkiao", "snippet": s[:60], "src": "rule"}
+            continue
         for k, v in SECTIONS.items():
-            if s.startswith(k):
+            if k in s and len(s) <= 220:
                 cur = v
                 break
         if cur == "end":
             break
         hits = []
         for nm in keys:
+            if nm in n2c:
+                code_of.setdefault(nm, n2c[nm])
             if nm in s and not any(nm in h or h in nm for h in hits):
                 hits.append(nm)
-        for nm in hits[:4]:
-            if nm in feng:            # 只出现在风标句里 → 忽略
-                continue
-            code = n2c[nm]
-            pol, sn = polarity(flat, (nm,))        # 在整段（无换行）上判，OCR 折行也能接上
-            if pol == "bull":
-                bull.setdefault(code, {"name": nm, "section": cur, "snippet": s[:60], "src": "rule"})
-            elif pol == "bear":
-                bear.setdefault(code, {"name": nm, "section": cur, "snippet": s[:60], "src": "rule"})
-            else:
-                notes.append({"line": s, "section": cur, "name": nm})
-    return bull, bear, notes
+        for nm in hits[:8]:
+            pol, sn = polarity_bounded(flat, nm, positions)
+            evid.setdefault(nm, []).append({"section": cur, "polarity": pol,
+                                            "line": s[:70], "snip": sn})
+    # 3) 汇总证据：优先决策段（short/theme/trend），段内有空则退到 other
+    for nm, ev in evid.items():
+        prefs = [e for e in ev if e["section"] in ("short", "theme", "trend")]
+        pool = prefs or ev
+        bears = [e for e in pool if e["polarity"] == "bear"]
+        bulls = [e for e in pool if e["polarity"] == "bull"]
+        chosen = bears[0] if bears else (bulls[0] if bulls else None)
+        if not chosen:
+            notes.append({"line": pool[0]["line"], "section": pool[0]["section"], "name": nm})
+            continue
+        code = code_of.get(nm)
+        if not code:
+            continue
+        rec = {"name": nm, "section": chosen["section"],
+               "snippet": (chosen.get("snip") or chosen["line"])[:70], "src": "rule"}
+        if chosen["polarity"] == "bull":
+            bull[code] = rec
+            bear.pop(code, None)
+        else:
+            bear[code] = rec
+            bull.pop(code, None)
+    for d in (bull, bear):
+        for code in list(d):
+            fk["bull"].pop(code, None)
+            fk["bear"].pop(code, None)      # 决策段已判定的票，不再算风标
+    return bull, bear, notes, fk
 
 
 def _default_webhook():
@@ -225,7 +370,14 @@ def load_names():
     uniq, keys, name_of, short2 = gs.build_dict()
     raw = json.load(open(gs.STOCKDICT, encoding="utf-8"))
     n2c = {k: str(v).zfill(6) for k, v in raw.items()}
-    keys = sorted([k for k in n2c if len(k) >= 3 and not any(ch.isdigit() for ch in k)
+    # 简称（冰山冷热→冰山、哈药股份→哈药…）：唯一映射才启用（组信号层已做泛词过滤）
+    for a, c in (short2 or {}).items():
+        if a not in AMBIGUOUS and a not in n2c:
+            n2c[a] = c
+    for a, c in (uniq or {}).items():
+        if a not in AMBIGUOUS and a not in n2c:
+            n2c[a] = c
+    keys = sorted([k for k in n2c if len(k) >= 2 and not any(ch.isdigit() for ch in k)
                    and k not in AMBIGUOUS], key=len, reverse=True)
     return n2c, keys
 
@@ -303,19 +455,19 @@ def ai_review(lines, n2c, keys, section_of=None):
     return res
 
 
-def compute_layers(hn_bull, hn_bear, lq_bull, lq_bear):
+def compute_layers(hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
     A = set(hn_bull) - set(hn_bear)
     lq_short = {c for c, x in lq_bull.items() if x.get("section") == "short"}
-    lq_bear = set(lq_bear)
+    lq_bear = set(lq_bear) | set(fk_bear or {})
     L3 = {c for c in (A & lq_bear) if any(w in (hn_bull.get(c, {}).get("snippet") or "")
                                           for w in REVERSE_WORDS)}
     L5 = (A & lq_short) - lq_bear
     return A, L3, L5
 
 
-def explain_layers(hn_bull, hn_bear, lq_bull, lq_bear):
+def explain_layers(hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
     """输出每条 L3/L5 的判定证据（纯规则，便于事后核对）"""
-    A, L3, L5 = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear)
+    A, L3, L5 = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear, fk_bear)
     out = []
     for c in sorted(L3):
         snip = (hn_bull.get(c) or {}).get("snippet") or ""
@@ -344,8 +496,8 @@ def fmt_list(codes, bull, lq_bull, lq_bear):
     return "、".join(out)
 
 
-def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear):
-    A, L3, L5 = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear)
+def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
+    A, L3, L5 = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear, fk_bear)
     if not L3 and not L5:
         return None
     lines = ["**%s 预案信号预警**" % date, ""]
@@ -376,7 +528,51 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear):
     return "\n".join(lines)
 
 
-def once(dry_run=False, date=None):
+def collect_side(chat_id, date, tag):
+    """采集某群当日 00:00 → now 的预案内容（文字 + 内嵌图片 OCR）"""
+    start = "%sT00:00:00+08:00" % date
+    end = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    try:
+        msgs = messages_between(chat_id, start, end)
+    except Exception as e:
+        log("FETCH_FAIL %s %s" % (tag, str(e)[:120]))
+        return [], {"msgs": 0, "texts": 0, "imgs": 0}
+    os.makedirs(IMG_DIR, exist_ok=True)
+    texts, n_img, n_txt = [], 0, 0
+    for m in msgs:
+        raw = m.get("content") or ""
+        # 3a) 文本类消息（text/post/interactive 卡片）
+        t = norm(raw)
+        hhmm = m["create_time"][11:16]
+        in_morning = "06:00" <= hhmm <= "09:35"
+        if not in_morning:
+            continue                     # 只采集早盘时段（预案只在这时发）
+        if len(t) >= 30:
+            ok = looks_like_plan(t) or in_morning
+            if not ok and len(t) >= 150:
+                v = ai_is_plan(t)
+                if v is True:
+                    ok = True
+                    log("AI 判定为预案：%s %s" % (tag, m["create_time"][11:16]))
+            if ok:
+                texts.append((m["create_time"], t))
+                n_txt += 1
+                log("  文本预案 %s %s len=%d" % (tag, m["create_time"][11:16], len(t)))
+        # 3b) 内嵌图片（post 里的 ![Image](img_v3_…) 或 image 消息）
+        for fk in set(re.findall(r"img_v3_[0-9a-zA-Z_\-]+", raw)):
+            n_img += 1
+            out = os.path.join(IMG_DIR, "%s_%s_%s.png" % (tag, m["message_id"][-8:], fk[-6:]))
+            p = download_image({"message_id": m["message_id"], "content": raw}, out)
+            if not p:
+                continue
+            ot = norm(ocr_text(p))
+            if ot and looks_like_plan(ot):
+                texts.append((m["create_time"], ot))
+                log("  图片预案 %s %s len=%d" % (tag, m["create_time"][11:16], len(ot)))
+    return texts, {"msgs": len(msgs), "texts": n_txt, "imgs": n_img}
+
+
+def once(dry_run=False, date=None, send=True):
     n2c, keys = load_names()
     if dry_run:
         # 用归档演练
@@ -423,27 +619,17 @@ def once(dry_run=False, date=None):
         return md
 
     today = datetime.now().strftime("%Y-%m-%d")
-    os.makedirs(IMG_DIR, exist_ok=True)
-    texts = {"hn": [], "lq": []}
+    texts, stat = {}, {}
     for tag, chat in (("hn", CHAT_HONGNIU), ("lq", CHAT_LAIQIU)):
-        msgs = recent_messages(chat, 25)
-        for m in msgs:
-            if m["create_time"][:10] != today:
-                continue
-            if m.get("msg_type") != "image":
-                continue
-            out = os.path.join(IMG_DIR, "%s_%s.png" % (tag, m["message_id"][-8:]))
-            p = download_image(m, out)
-            if not p:
-                continue
-            t = ocr_text(p)
-            if "预案" in t or "策略" in t or "短线方面" in t or "具体机会" in t:
-                texts[tag].append((m["create_time"], t))
+        texts[tag], stat[tag] = collect_side(chat, today, tag)
+    log("采集：红牛 消息%d/文本%d/图片%d → 预案段%d｜来去 消息%d/文本%d/图片%d → 预案段%d"
+        % (stat["hn"]["msgs"], stat["hn"]["texts"], stat["hn"]["imgs"], len(texts["hn"]),
+           stat["lq"]["msgs"], stat["lq"]["texts"], stat["lq"]["imgs"], len(texts["lq"])))
     if not texts["hn"] or not texts["lq"]:
-        log("预案未齐：红牛 %d 张 / 来去 %d 张" % (len(texts["hn"]), len(texts["lq"])))
+        log("预案未齐：红牛 %d 段 / 来去 %d 段" % (len(texts["hn"]), len(texts["lq"])))
         return None
-    hn_bull, hn_bear, hn_notes = parse_plans(texts["hn"], (n2c, keys))
-    lq_bull, lq_bear, lq_notes = parse_plans(texts["lq"], (n2c, keys))
+    hn_bull, hn_bear, hn_notes, hn_fk = parse_plans(texts["hn"], (n2c, keys))
+    lq_bull, lq_bear, lq_notes, lq_fk = parse_plans(texts["lq"], (n2c, keys))
     if AI_ENABLED:
         for tag, bull, bear, notes in (("红牛", hn_bull, hn_bear, hn_notes),
                                        ("来去", lq_bull, lq_bear, lq_notes)):
@@ -461,9 +647,10 @@ def once(dry_run=False, date=None):
                     bear[code] = {"name": nm, "section": sec, "snippet": notes[i]["line"][:60],
                                   "src": "ai:" + why[:16]}
     log("解析：红牛 多%d/空%d，来去 多%d/空%d" % (len(hn_bull), len(hn_bear), len(lq_bull), len(lq_bear)))
-    for line in explain_layers(hn_bull, hn_bear, lq_bull, lq_bear):
+    log("风标：来去 多头%d/空头%d" % (len(lq_fk["bull"]), len(lq_fk["bear"])))
+    for line in explain_layers(hn_bull, hn_bear, lq_bull, lq_bear, lq_fk["bear"]):
         log("  证据 " + line)
-    md = build_message(today, hn_bull, hn_bear, lq_bull, lq_bear)
+    md = build_message(today, hn_bull, hn_bear, lq_bull, lq_bear, lq_fk["bear"])
     if not md:
         log("当日无 L3/L5 信号")
         return None
@@ -475,6 +662,9 @@ def once(dry_run=False, date=None):
             st = {}
     if st.get("date") == today and st.get("sent_hash") == hash(md):
         log("已推送过，跳过")
+        return md
+    if not send:
+        log("（--no-send）不推送，仅输出")
         return md
     if send_feishu(md):
         json.dump({"date": today, "sent_hash": hash(md)}, open(STATE, "w", encoding="utf-8"))
@@ -488,6 +678,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--date", default="")
     ap.add_argument("--test-send", action="store_true")
+    ap.add_argument("--no-send", action="store_true")
     ap.add_argument("--interval", type=int, default=60)
     ap.add_argument("--until", default="09:20")
     a = ap.parse_args()
@@ -499,7 +690,7 @@ def main():
         once(dry_run=True, date=a.date or datetime.now().strftime("%Y-%m-%d"))
         return
     if a.once:
-        once()
+        once(send=not a.no_send)
         return
     if a.loop:
         hh, mm = map(int, a.until.split(":"))
