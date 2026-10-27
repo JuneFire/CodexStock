@@ -515,8 +515,10 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
             hn_s = (hn_bull.get(c) or {}).get("snippet") or ""
             lq_s = (lq_bear.get(c) or {}).get("snippet") or ""
             lines.append("　· %s｜红牛：%s｜来去：%s" % (c, _flat(hn_s, 42), _flat(lq_s, 36)))
-        lines.append("　→ 执行：**开盘跌幅 ≥5% 才买**，仓位减半，破前低即走")
-        lines.append("　→ 历史：n=27，D+1 胜率 81.5% / 均值 +4.88%")
+        lines.append("　→ 执行：**开盘全仓买入**；盘中跌破买入价 **-5%** 立即止损")
+        lines.append("　→ D+1 收绿（收盘<前收）清仓；收红尾盘卖 **1/3**")
+        lines.append("　→ 剩余：每日新高才持有，不新高当日收盘清；D+3 再卖 1/2；D+5 尾盘清")
+        lines.append("　→ 历史（满仓复利/未计费）：23 笔，+378.6%，最大回撤 -14.3%，胜率 60.9%")
         lines.append("")
     if L5:
         lines.append("🟡 **L5 短线接力**")
