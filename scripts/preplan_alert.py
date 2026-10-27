@@ -911,7 +911,7 @@ def once(dry_run=False, date=None, send=True):
     do_final = bool(items) and now_hm >= final_at and not st_l1.get("l1_final")
     incremental = os.environ.get("L1_INCREMENTAL", "0").strip() in ("1", "true", "yes")
     gap_ok = (not last_ts) or (time.time() - float(last_ts) > 90)
-    if (do_final or (incremental and added)) and gap_ok:
+    if send and (do_final or (incremental and added)) and gap_ok:
         ver += 1
         if send_l1_update(today, items, added, ver, final=do_final):
             st_l1.update({"l1_ver": ver, "l1_pushed": sorted(set(pushed) | set(x["code"] for x in items)),
