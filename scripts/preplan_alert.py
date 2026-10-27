@@ -1042,9 +1042,8 @@ def main():
         return
     if a.loop:
         os.environ.setdefault("L1_FINAL_AT", a.l1_final)
-        global SPLIT_N, CAPITAL
-        SPLIT_N = a.split
-        CAPITAL = a.capital or None
+        globals()["SPLIT_N"] = a.split
+        globals()["CAPITAL"] = a.capital or None
         if a.l1_incremental:
             os.environ["L1_INCREMENTAL"] = "1"
         hh, mm = map(int, a.until.split(":"))
