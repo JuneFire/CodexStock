@@ -573,7 +573,7 @@ def collect_side(chat_id, date, tag):
             if not p:
                 continue
             ot = norm(ocr_text(p))
-            if ot and looks_like_plan(ot):
+            if ot and (looks_like_plan(ot) or len(ot) >= 40):
                 texts.append((m["create_time"], ot))
                 log("  图片预案 %s %s len=%d" % (tag, m["create_time"][11:16], len(ot)))
     return texts, {"msgs": len(msgs), "texts": n_txt, "imgs": n_img}
