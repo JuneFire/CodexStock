@@ -125,6 +125,105 @@ def plan_exits(S, i, stop, first_sell, third_day_half, max_day):
     return out
 
 
+def run_sim(eps, dates, didx, n2c, capital=10000.0, stop=0.05, first_sell=1/3.0,
+            third_half=True, max_day=5, fixed=0.0):
+    """逐日组合模拟（仓位按剩余单位逐个扣减，现金按实际回笼计入）。
+
+    返回 (trades, equity_curve, final_cash, max_drawdown)
+    """
+    cash = capital
+    pos = None
+    trades = []
+    eq = []
+
+    def bar(S, d):
+        j = S.pos.get(d)
+        return S.kl[j] if (j is not None and 0 <= j < len(S.kl)) else None
+
+    i0 = didx[eps[0][0]]
+    i1 = min(didx[eps[-1][0]] + max_day + 3, len(dates))
+    for i in range(i0, i1):
+        d = dates[i]
+        # 开盘开仓（满仓只剩一个仓位）
+        if pos is None:
+            cand = [c for (dd, c) in eps if dd == d]
+            if cand:
+                c = cand[0]
+                S = rv.series(c)
+                j = S.pos[d]
+                b = S.kl[j]
+                stake = cash if fixed <= 0 else min(fixed, cash)
+                if stake > 0:
+                    pos = {"code": c, "name": n2c.get(c, c), "entry": b["open"],
+                           "units": stake / b["open"], "stake": stake, "back": 0.0,
+                           "i": i, "d": d, "S": S, "h": b["high"], "entry_d": d, "why": ""}
+                    cash -= stake
+        # 收盘处理
+        if pos:
+            S = pos["S"]
+            b = bar(S, d)
+            if b is not None and i > pos["i"]:
+                k = i - pos["i"]
+                done = False
+                sp = pos["entry"] * (1 - stop) if stop else None
+                if sp and b["low"] <= sp:
+                    pos["back"] += pos["units"] * sp
+                    pos["units"] = 0.0
+                    pos["why"] = "止损%.0f%%" % (stop * 100)
+                    done = True
+                if not done and k == 1:
+                    prev = bar(S, pos["entry_d"])
+                    if prev and b["close"] <= prev["close"]:
+                        pos["back"] += pos["units"] * b["close"]
+                        pos["units"] = 0.0
+                        pos["why"] = "D+1收绿清仓"
+                        done = True
+                    else:
+                        f = pos["units"] * first_sell
+                        pos["back"] += f * b["close"]
+                        pos["units"] -= f
+                        pos["h"] = max(pos["h"], b["high"])
+                if not done and 2 <= k <= 4:
+                    if b["high"] <= pos["h"]:
+                        pos["back"] += pos["units"] * b["close"]
+                        pos["units"] = 0.0
+                        pos["why"] = "D+%d未新高清仓" % k
+                        done = True
+                    else:
+                        pos["h"] = max(pos["h"], b["high"])
+                    if not done and k == 3 and third_half:
+                        f = pos["units"] * 0.5
+                        pos["back"] += f * b["close"]
+                        pos["units"] -= f
+                if not done and k >= max_day:
+                    pos["back"] += pos["units"] * b["close"]
+                    pos["units"] = 0.0
+                    pos["why"] = "D+%d清仓" % k
+                if pos["units"] <= 1e-9:
+                    cash += pos["back"]
+                    trades.append({"d": pos["d"], "name": pos["name"], "code": pos["code"],
+                                   "stake": pos["stake"], "back": pos["back"],
+                                   "ret": pos["back"] / pos["stake"] - 1,
+                                   "why": pos["why"], "exit_d": d})
+                    pos = None
+        mtm = cash + (pos["back"] if pos else 0.0)
+        if pos:
+            b = bar(pos["S"], d)
+            if b:
+                mtm += pos["units"] * b["close"]
+        eq.append((d, mtm))
+    if pos:
+        b = bar(pos["S"], dates[i1 - 1])
+        if b:
+            cash += pos["back"] + pos["units"] * b["close"]
+    peak = capital
+    mdd = 0.0
+    for _, v in eq:
+        peak = max(peak, v)
+        mdd = min(mdd, v / peak - 1)
+    return trades, eq, cash, mdd
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--capital", type=float, default=10000.0)
@@ -138,52 +237,23 @@ def main():
 
     eps, dates, didx, n2c = load_signals()
     print("L3 首波信号 %d 个（%s → %s）" % (len(eps), eps[0][0], eps[-1][0]))
-    cash = a.capital
-    busy = -1
-    trades = []
-    curve = []
-    i0, i1 = didx[eps[0][0]], min(didx[eps[-1][0]] + a.max_day + 3, len(dates))
-    for i in range(i0, i1):
-        d = dates[i]
-        if i <= busy:
-            continue
-        cand = [c for (dd, c) in eps if dd == d]
-        if not cand:
-            continue
-        c = cand[0]
-        S = rv.series(c)
-        j = S.pos[d]
-        plan = plan_exits(S, j, a.stop, a.first_sell, not a.no_third_half, a.max_day)
-        entry = S.kl[j]["open"]
-        stake = cash if a.fixed <= 0 else min(a.fixed, cash)
-        units = stake / entry
-        back = 0.0
-        for (ej, frac, px, why) in plan:
-            back += units * frac * px
-        cash += back - stake
-        busy = max(e[0] for e in plan)
-        trades.append({"d": d, "name": n2c.get(c, c), "code": c, "stake": stake,
-                       "ret": back / stake - 1 if stake else 0,
-                       "exits": [(S.dates[e], f, px, w) for e, f, px, w in plan]})
-        curve.append((dates[busy] if busy < len(dates) else dates[-1], cash))
-    # 最大回撤（按每次平仓后的资金序列，偏保守）
-    peak = a.capital
-    mdd = 0
-    for _, v in curve:
-        peak = max(peak, v)
-        mdd = min(mdd, v / peak - 1)
+    trades, eq, cash, mdd = run_sim(eps, dates, didx, n2c,
+                                     capital=a.capital, stop=a.stop, first_sell=a.first_sell,
+                                     third_half=not a.no_third_half, max_day=a.max_day,
+                                     fixed=a.fixed)
     n = len(trades)
     wins = sum(1 for t in trades if t["ret"] > 0)
-    print("\n参数：本金 %.0f｜止损 %s｜D+1 卖 %.0f%%｜D+3 卖一半 %s｜最多持 %d 日｜%s"
+    print()
+    print("参数：本金 %.0f｜止损 %s｜D+1 卖 %.0f%%｜D+3 卖一半 %s｜最多持 %d 日｜%s"
           % (a.capital, ("%.0f%%" % (a.stop * 100)) if a.stop else "无",
              a.first_sell * 100, "是" if not a.no_third_half else "否", a.max_day,
              "满仓复利" if a.fixed <= 0 else "每笔固定 %.0f" % a.fixed))
-    print("结果：%d 笔｜期末 %.0f 元｜收益 %+.1f%%｜胜率 %.1f%%｜最大回撤(平仓口径) %.1f%%"
+    print("结果：%d 笔｜期末 %.0f 元｜收益 %+.1f%%｜胜率 %.1f%%｜最大回撤(MTM) %.1f%%"
           % (n, cash, (cash / a.capital - 1) * 100, 100 * wins / max(1, n), mdd * 100))
     if a.detail:
         print("\n%-11s %-9s %8s %8s  %s" % ("买入日", "名称", "投入", "整笔%", "卖出过程"))
         for t in trades:
-            det = "; ".join("%s卖%.0f%%@%.2f(%s)" % (d[5:], f * 100, px, w) for d, f, px, w in t["exits"])
+            det = "%+.1f%% %s" % (t["ret"] * 100, t["why"])
             print("%-11s %-9s %8.0f %8.1f  %s" % (t["d"], t["name"], t["stake"], t["ret"] * 100, det))
 
 
