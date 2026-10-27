@@ -579,6 +579,34 @@ def collect_side(chat_id, date, tag):
     return texts, {"msgs": len(msgs), "texts": n_txt, "imgs": n_img}
 
 
+def last_run_summary():
+    """读取当日最后一次采集摘要（兜底提醒用）"""
+    try:
+        return json.load(open(STATE, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def send_fallback(date, summary):
+    """兜底：到点仍没发出任何预警时，说明原因（预案未齐/无信号）"""
+    lines = ["**%s 预案预警（兜底提醒）**" % date, ""]
+    hn, lq = summary.get("hn", {}), summary.get("lq", {})
+    if not summary.get("both"):
+        lines.append("⚠️ **两家预案没凑齐，今天没做 L3/L5 判断**")
+        lines.append("　红牛：消息 %s 条 / 预案段 %s" % (hn.get("msgs", 0), hn.get("plans", 0)))
+        lines.append("　来去：消息 %s 条 / 预案段 %s" % (lq.get("msgs", 0), lq.get("plans", 0)))
+        lines.append("　可能原因：预案改成了新格式（非图片/非标准文本）、群消息被撤、或发送时间晚于 09:20")
+        lines.append("　→ 请顺手看一眼两个群，我按需调整解析规则")
+    else:
+        lines.append("两家预案已解析成功，但**今天没有 L3/L5 信号**")
+        lines.append("　红牛 多%s / 空%s；来去 多%s / 空%s（风标 空%s）"
+                     % (hn.get("bull", 0), hn.get("bear", 0), lq.get("bull", 0), lq.get("bear", 0),
+                        summary.get("fk_bear", 0)))
+    if summary.get("l1"):
+        lines.append("　（红牛看多合计 %d 只，可对照 L1）" % summary["l1"])
+    return send_feishu(chr(10).join(lines))
+
+
 def once(dry_run=False, date=None, send=True):
     n2c, keys = load_names()
     if dry_run:
@@ -629,6 +657,13 @@ def once(dry_run=False, date=None, send=True):
     texts, stat = {}, {}
     for tag, chat in (("hn", CHAT_HONGNIU), ("lq", CHAT_LAIQIU)):
         texts[tag], stat[tag] = collect_side(chat, today, tag)
+    smry = {"date": today,
+            "hn": {"msgs": stat["hn"]["msgs"], "plans": len(texts["hn"])},
+            "lq": {"msgs": stat["lq"]["msgs"], "plans": len(texts["lq"])},
+            "both": bool(texts["hn"] and texts["lq"])}
+    st0 = last_run_summary()
+    st0.update(smry)
+    json.dump(st0, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
     log("采集：红牛 消息%d/文本%d/图片%d → 预案段%d｜来去 消息%d/文本%d/图片%d → 预案段%d"
         % (stat["hn"]["msgs"], stat["hn"]["texts"], stat["hn"]["imgs"], len(texts["hn"]),
            stat["lq"]["msgs"], stat["lq"]["texts"], stat["lq"]["imgs"], len(texts["lq"])))
@@ -655,6 +690,14 @@ def once(dry_run=False, date=None, send=True):
                                   "src": "ai:" + why[:16]}
     log("解析：红牛 多%d/空%d，来去 多%d/空%d" % (len(hn_bull), len(hn_bear), len(lq_bull), len(lq_bear)))
     log("风标：来去 多头%d/空头%d" % (len(lq_fk["bull"]), len(lq_fk["bear"])))
+    st1 = last_run_summary()
+    st1.update({"hn": {"msgs": stat["hn"]["msgs"], "plans": len(texts["hn"]),
+                       "bull": len(hn_bull), "bear": len(hn_bear)},
+                "lq": {"msgs": stat["lq"]["msgs"], "plans": len(texts["lq"]),
+                       "bull": len(lq_bull), "bear": len(lq_bear)},
+                "fk_bear": len(lq_fk["bear"]), "l1": len(set(hn_bull) - set(hn_bear)),
+                "both": True})
+    json.dump(st1, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
     for line in explain_layers(hn_bull, hn_bear, lq_bull, lq_bear, lq_fk["bear"]):
         log("  证据 " + line)
     md = build_message(today, hn_bull, hn_bear, lq_bull, lq_bear, lq_fk["bear"])
@@ -710,6 +753,11 @@ def main():
                 log("ERR %s" % str(e)[:200])
             time.sleep(a.interval)
         log("监听结束")
+        today = datetime.now().strftime("%Y-%m-%d")
+        st = last_run_summary()
+        if st.get("date") == today and not st.get("sent_hash"):
+            log("今日未推送 → 发兜底提醒")
+            send_fallback(today, st)
         return
     ap.print_help()
 
