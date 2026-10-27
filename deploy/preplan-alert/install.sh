@@ -51,7 +51,7 @@ echo "    lark-cli auth login --scope \"im:message.readonly\" --no-wait --json"
 echo "    手机扫码 → lark-cli auth login --device-code <code>"
 
 echo "== 5. cron（每交易日 08:30 启动，循环到 09:20）=="
-CRON_LINE="30 8 * * 1-5 cd $REPO_ROOT && $VENV/bin/python scripts/preplan_alert.py --loop --until 09:20 >> logs/preplan_alert.log 2>&1"
+CRON_LINE="30 7 * * 1-5 cd $REPO_ROOT && PREPLAN_AI=1 $VENV/bin/python scripts/preplan_alert.py --loop --until 09:35 --l1-final 09:00 --interval 300 >> logs/preplan_alert.log 2>&1"
 ( crontab -l 2>/dev/null | grep -v preplan_alert || true; echo "$CRON_LINE" ) | crontab -
 crontab -l | tail -2
 
