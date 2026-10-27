@@ -629,6 +629,120 @@ def collect_side(chat_id, date, tag):
     return texts, {"msgs": len(msgs), "texts": n_txt, "imgs": n_img}
 
 
+AUDIT_CACHE = os.path.join(ROOT, "data", "feishu", "ai_audit_cache.json")
+_AUDIT_SYS = (
+    "你是A股短线预案解析器。输入若干条「股票名 + 预案片段」，判断该股票在片段中的方向。"
+    "输出 JSON 对象，形如 {\"verdicts\":[{\"i\":0,\"name\":\"某股\",\"v\":\"bull\",\"why\":\"低吸买点\"}]}，不要解释。"
+    "bull=明确看多/建议参与(低吸/买点/打底/埋伏/加仓/接回/强锁买点)；"
+    "bear=明确看空或提示出局(断板/兑现/补跌/走弱/减仓/清仓/走人/不参与/回避)；"
+    "neutral=仅提及/条件未定/纯描述。"
+    "「先手为主」「观察」「看戏」「分歧预期」一律 neutral。"
+)
+
+
+def _audit_cache_load():
+    try:
+        return json.load(open(AUDIT_CACHE, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def ai_audit(items):
+    """对当日红牛看多票逐只做 LLM 复核。
+
+    items: [(code, name, snippet)]；返回 {code: (verdict, why)}，verdict ∈ bull/bear/neutral
+    结果按 (name+snippet) 哈希缓存，同一片段不重复付费。
+    """
+    if not items:
+        return {}
+    if not ai_client.available():
+        return {}
+    import hashlib
+    cache = _audit_cache_load()
+    todo, res = [], {}
+    for code, name, snip in items:
+        k = hashlib.sha1((str(name) + "|" + str(snip)).encode("utf-8")).hexdigest()[:16]
+        if k in cache:
+            res[code] = tuple(cache[k])
+        else:
+            todo.append((code, name, snip, k))
+    if todo:
+        payload = {"数量": len(todo),
+                   "条目": ["%s|%s" % (t[1], re.sub(r"\s+", " ", t[2] or "")[:160]) for t in todo]}
+        out, err = ai_client.chat_json(_AUDIT_SYS, json.dumps(payload, ensure_ascii=False),
+                                       retries=1, max_tokens=800)
+        arr = None
+        if isinstance(out, dict):
+            for kk in ("verdicts", "r", "data", "结果"):
+                if isinstance(out.get(kk), list):
+                    arr = out[kk]
+                    break
+        elif isinstance(out, list):
+            arr = out
+        if arr is None:
+            log("AI_AUDIT_FAIL %s" % (err or str(out)[:80]))
+        else:
+            for idx, it in enumerate(arr):
+                if not isinstance(it, dict):
+                    continue
+                i = it.get("i")
+                v = str(it.get("v") or it.get("verdict") or "").strip().lower()
+                if v not in ("bull", "bear", "neutral"):
+                    continue
+                tgt = None
+                if isinstance(i, int) and 0 <= i < len(todo):
+                    tgt = todo[i]
+                elif it.get("name"):
+                    tgt = next((t for t in todo if t[1] == it["name"]), None)
+                if not tgt:
+                    continue
+                res[tgt[0]] = (v, str(it.get("why") or "")[:14])
+                cache[tgt[3]] = [v, str(it.get("why") or "")[:14]]
+            try:
+                json.dump(cache, open(AUDIT_CACHE, "w", encoding="utf-8"), ensure_ascii=False)
+            except Exception:
+                pass
+        log("AI_AUDIT %d 只（缓存 %d，新判 %d）" % (len(res), len(cache) - len(todo), len(todo)))
+    return res
+
+
+TIER_MARK = {"bull": "✅多", "bear": "⛔空", "neutral": "·中性"}
+
+
+def send_l1_update(date, items, added, version, final=False):
+    """L1 分批推送。items: [{code,name,tier,tag,why}]；added: 本次新增的 code 列表"""
+    head = ("**%s L1 红牛看多·定稿（%s）**" % (date, datetime.now().strftime("%H:%M"))
+            if final else
+            "**%s L1 红牛看多·更新 #%d（%s）**" % (date, version, datetime.now().strftime("%H:%M")))
+    lines = [head, ""]
+    if added and not final:
+        names = [x["name"] for x in items if x["code"] in added]
+        lines.append("🆕 新增 **%d 只**：%s" % (len(added), "、".join(names)))
+        lines.append("")
+    for x in items:
+        marks = []
+        if x.get("tier"):
+            marks.append("[%s]" % x["tier"])
+        if x.get("ai"):
+            marks.append(TIER_MARK.get(x["ai"], ""))
+        if x.get("tag"):
+            marks.append(x["tag"])
+        lines.append("　· %s(%s) %s" % (x["name"], x["code"], " ".join(m for m in marks if m)))
+        if x.get("why"):
+            lines.append("　　　AI：%s" % x["why"])
+        if x.get("snip"):
+            lines.append("　　　原文：%s" % x["snip"][:52])
+    ok = [x for x in items if x.get("ai") != "bear"]
+    lines.append("")
+    if final:
+        lines.append("**→ 09:25 竞价后从上面 %d 只里选涨幅最高的一只，开盘满仓**" % len(ok))
+        lines.append("　· ⛔空 的票不进候选（AI 判定红牛原文实际看空/提示出局）")
+        lines.append("　· 出场：次日收盘卖（T+1 合规）；历史 56 笔 +548.6% / 胜率 62.5% / 回撤 -19.4%")
+    else:
+        lines.append("_（预案仍在更新，09:10 出定稿；此条为增量提醒）_")
+    return send_feishu(chr(10).join(lines))
+
+
 def last_run_summary():
     """读取当日最后一次采集摘要（兜底提醒用）"""
     try:
@@ -651,13 +765,19 @@ def send_auction(date, l3_cands, l1_cands):
         return sorted(v, key=lambda z: -z["gap"])
 
     L3 = rank(l3_cands)
-    L1 = rank(l1_cands)
+    l1_ok = [x for x in l1_cands if x.get("ai") != "bear"]
+    veto = [x for x in l1_cands if x.get("ai") == "bear"]
+    L1 = rank(l1_ok)
     lines = ["**%s 竞价定档（09:25）**" % date, ""]
     if L3:
         lines.append("🔴 **L3 超跌反核（优先）**")
         for i, x in enumerate(L3, 1):
             lines.append("%s%d. %s(%s) 竞价 **%+.2f%%**" % ("👉 " if i == 1 else "　　", i,
                                                         full_name(x["code"], x["name"]), x["code"], x["gap"]))
+        lines.append("")
+    if veto:
+        lines.append("⛔ **AI 判空已排除**：%s" % "、".join(
+            "%s(%s)" % (full_name(x["code"], x["name"]), x["code"]) for x in veto))
         lines.append("")
     if L1:
         lines.append("📋 **L1 红牛看多（%d 只，按竞价排序）**" % len(L1))
@@ -762,10 +882,47 @@ def once(dry_run=False, date=None, send=True):
     log("采集：红牛 消息%d/文本%d/图片%d → 预案段%d｜来去 消息%d/文本%d/图片%d → 预案段%d"
         % (stat["hn"]["msgs"], stat["hn"]["texts"], stat["hn"]["imgs"], len(texts["hn"]),
            stat["lq"]["msgs"], stat["lq"]["texts"], stat["lq"]["imgs"], len(texts["lq"])))
-    if not texts["hn"] or not texts["lq"]:
-        log("预案未齐：红牛 %d 段 / 来去 %d 段" % (len(texts["hn"]), len(texts["lq"])))
+    if not texts["hn"]:
+        log("红牛预案还没来，等待")
         return None
     hn_bull, hn_bear, hn_notes, hn_fk = parse_plans(texts["hn"], (n2c, keys))
+    lq_bull, lq_bear, lq_notes, lq_fk = parse_plans(texts["lq"], (n2c, keys)) if texts["lq"] else ({}, {}, [], {"bull": {}, "bear": {}})
+
+    # ---- L1 分批推送（红牛看多，AI 逐只复核，09:10 定稿）----
+    L1_set0 = set(hn_bull) - set(hn_bear)
+    audit = ai_audit([(c, (hn_bull.get(c) or {}).get("name", c),
+                       (hn_bull.get(c) or {}).get("snippet", "")) for c in sorted(L1_set0)])
+    st_l1 = last_run_summary()
+    if st_l1.get("date") != today:
+        st_l1 = {"date": today}
+    pushed = set(st_l1.get("l1_pushed") or [])
+    items = []
+    for c in sorted(L1_set0, key=lambda x: full_name(x, x)):
+        rec = hn_bull.get(c) or {}
+        av = (audit.get(c) or ("", ""))[0]
+        items.append({"code": c, "name": full_name(c, rec.get("name", c)),
+                      "tier": tier_tag(rec.get("snippet", "")), "ai": av,
+                      "why": (audit.get(c) or ("", ""))[1], "snip": rec.get("snippet", "")})
+    added = [x["code"] for x in items if x["code"] not in pushed]
+    now_hm = datetime.now().strftime("%H:%M")
+    last_ts = st_l1.get("l1_last_ts") or ""
+    final_at = os.environ.get("L1_FINAL_AT", "09:10")
+    ver = int(st_l1.get("l1_ver") or 0)
+    do_final = bool(items) and now_hm >= final_at and not st_l1.get("l1_final")
+    gap_ok = (not last_ts) or (time.time() - float(last_ts) > 90)
+    if (added or do_final) and gap_ok:
+        ver += 1
+        if send_l1_update(today, items, added, ver, final=do_final):
+            st_l1.update({"l1_ver": ver, "l1_pushed": sorted(set(pushed) | set(x["code"] for x in items)),
+                          "l1_last_ts": time.time(), "l1_count": len(items),
+                          "l1_final": True if do_final else st_l1.get("l1_final", False)})
+            json.dump(st_l1, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+            log("L1 推送 #%d：%d 只（新增 %d，定稿=%s）" % (ver, len(items), len(added), do_final))
+        else:
+            log("L1 推送失败")
+    if not texts["lq"]:
+        log("来去预案未到，先只做 L1（红牛 %d 只）" % len(L1_set0))
+        return None
     lq_bull, lq_bear, lq_notes, lq_fk = parse_plans(texts["lq"], (n2c, keys))
     if AI_ENABLED:
         for tag, bull, bear, notes in (("红牛", hn_bull, hn_bear, hn_notes),
@@ -791,8 +948,10 @@ def once(dry_run=False, date=None, send=True):
                   "gap": None, "hn": (hn_bull.get(c) or {}).get("snippet", "")[:50]}
                  for c in sorted(L3_set)]
     L1_set = set(hn_bull) - set(hn_bear)
-    st1["L1"] = [{"code": c, "name": (hn_bull.get(c) or {}).get("name", c),
-                  "gap": None, "hn": (hn_bull.get(c) or {}).get("snippet", "")[:50]}
+    st1["L1"] = [{"code": c, "name": full_name(c, (hn_bull.get(c) or {}).get("name", c)),
+                  "gap": None, "ai": (audit.get(c) or ("", ""))[0],
+                  "tier": tier_tag((hn_bull.get(c) or {}).get("snippet", "")),
+                  "hn": (hn_bull.get(c) or {}).get("snippet", "")[:50]}
                  for c in sorted(L1_set)]
     log("候选：L1 %d 只 / L3 %d 只 / L5 %d 只" % (len(L1_set), len(L3_set), len(_L5)))
     st1.update({"hn": {"msgs": stat["hn"]["msgs"], "plans": len(texts["hn"]),
@@ -834,7 +993,8 @@ def main():
     ap.add_argument("--test-send", action="store_true")
     ap.add_argument("--no-send", action="store_true")
     ap.add_argument("--interval", type=int, default=60)
-    ap.add_argument("--until", default="09:20")
+    ap.add_argument("--until", default="09:30")
+    ap.add_argument("--l1-final", default="09:10", help="L1 定稿推送时间（默认 09:10）")
     a = ap.parse_args()
 
     if a.test_send:
@@ -847,6 +1007,7 @@ def main():
         once(send=not a.no_send)
         return
     if a.loop:
+        os.environ.setdefault("L1_FINAL_AT", a.l1_final)
         hh, mm = map(int, a.until.split(":"))
         deadline = datetime.now().replace(hour=hh, minute=mm, second=0, microsecond=0)
         log("开始监听（每 %ds，截止 %s）" % (a.interval, a.until))
