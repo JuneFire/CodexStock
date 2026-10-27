@@ -176,8 +176,17 @@ def quotes(codes):
         except ValueError:
             continue
         if op > 0 and prev > 0:
+            def _f(i):
+                try:
+                    return float(parts[i])
+                except Exception:
+                    return None
             out[code] = {"name": name, "open": op, "prev": prev,
-                         "gap": round(100 * (op / prev - 1), 2)}
+                         "gap": round(100 * (op / prev - 1), 2),
+                         "vol": _f(6),                    # 成交量(手)，09:25 时=竞价量
+                         "amt": (_f(37) or 0) / 1e4,      # 成交额(亿元)，09:25 时=竞价额
+                         "turn": _f(38),                  # 换手率(%)，09:25 时=竞价换手
+                         "fcap": _f(44)}                  # 流通市值(亿)
     # 兜底：东财单只
     missing = [c for c in codes if str(c).zfill(6) not in out]
     for c in missing:

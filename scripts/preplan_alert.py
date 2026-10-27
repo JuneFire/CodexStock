@@ -46,11 +46,7 @@ STATE = os.path.join(ROOT, "data", "feishu", "alert_state.json")
 LOG = os.path.join(ROOT, "logs", "preplan_alert.log")
 
 AI_ENABLED = os.environ.get("PREPLAN_AI", "").strip() in ("1", "true", "yes")
-SPLIT_N = int(os.environ.get("PREPLAN_SPLIT", "3") or 3)
-try:
-    CAPITAL = float(os.environ.get("PREPLAN_CAPITAL") or 0) or None
-except Exception:
-    CAPITAL = None
+SORT_BY = os.environ.get("PREPLAN_SORT", "gap").strip() or "gap"
 AI_CACHE = os.path.join(ROOT, "data", "feishu", "ai_cache.json")
 
 REVERSE_WORDS = ("反核", "次弱", "地板", "跌停开", "低吸", "反包", "低位")
@@ -740,11 +736,9 @@ def send_l1_update(date, items, added, version, final=False):
     ok = [x for x in items if x.get("ai") != "bear"]
     lines.append("")
     if final:
-        lines.append("**→ 09:25 竞价后排序，取涨幅前 %d 只等权买入（不足 %d 只就全买）**" % (SPLIT_N, SPLIT_N))
-        lines.append("　· ⛔空 的票不进候选（AI 判定红牛原文实际看空/提示出局）")
-        lines.append("　· 挂单：09:30 各挂涨停价买入；资金不足一手则跳过该只")
-        lines.append("　· 卖点：次日 14:55 全部卖出（T+1 合规）")
-        lines.append("　· 历史（分仓前3只/隔日卖，56 天）：+551.9%｜日胜率 71.4%｜回撤 -19.3%")
+        lines.append("**→ 09:25 竞价结束后会再推一条「竞价排名」**（涨幅/金额/换手），自行决定买哪只")
+        lines.append("　· ⛔空 的票不参与排名（AI 判定红牛原文实际看空/提示出局）")
+        lines.append("　· 出场参考：次日收盘卖（T+1 合规）；历史 56 笔 +548.6% / 胜率 62.5% / 回撤 -19.4%")
     else:
         lines.append("_（预案仍在更新，09:10 出定稿；此条为增量提醒）_")
     return send_feishu(chr(10).join(lines))
@@ -758,77 +752,79 @@ def last_run_summary():
         return {}
 
 
-def send_auction(date, l3_cands, l1_cands, split_n=3, capital=None):
-    """09:26 竞价定档：分仓方案 A
-       总资金切 split_n 份；L3 若触发优先占 1 份，其余给 L1 竞价最高的几只；
-       L3 未触发 → L1 取竞价前 split_n 只等权。
+def _yi(v):
+    """金额（亿元）→ 易读字符串"""
+    if not v:
+        return "—"
+    if v >= 1:
+        return "%.2f亿" % v
+    return "%.0f万" % (v * 1e4)
+
+
+def _pct(v):
+    return "—" if v is None else "%.2f%%" % v
+
+
+def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
+    """09:26 竞价排名（只给信息，不给买入指令）
+
+    输出：排名 / 名称(代码) / 板块 / 竞价涨幅 / 竞价金额 / 竞价换手 / AI判定 / 档位
+    sort_by: gap（默认）| amt | turn
     """
-    allx = list(l3_cands) + [x for x in l1_cands if x["code"] not in {y["code"] for y in l3_cands}]
+    seen = set()
+    allx = []
+    for x in list(l3_cands) + list(l1_cands):
+        if x["code"] in seen:
+            continue
+        seen.add(x["code"])
+        allx.append(x)
     if not allx:
         return False
     q = l3_strategy.quotes([x["code"] for x in allx])
     for x in allx:
         x.update(q.get(x["code"], {}))
 
-    def rank(lst):
-        v = [x for x in lst if x.get("gap") is not None]
-        return sorted(v, key=lambda z: -z["gap"])
+    def board(c):
+        c = str(c)
+        if c[:3] in ("300", "301", "688", "689"):
+            return "20cm"
+        if c[0] in ("4", "8") or c[:2] == "92":
+            return "30cm"
+        return "10cm"
 
-    L3 = rank(l3_cands)
-    l1_ok = [x for x in l1_cands if x.get("ai") != "bear"]
-    veto = [x for x in l1_cands if x.get("ai") == "bear"]
-    L1 = rank(l1_ok)
-    n_l1 = split_n - (1 if L3 else 0)
-    buy_l1 = L1[:max(1, n_l1)] if L1 else []
-    unit = (capital / split_n) if capital else None
+    veto = [x for x in allx if x.get("ai") == "bear"]
+    ok = [x for x in allx if x.get("gap") is not None and x.get("ai") != "bear"]
+    key = {"amt": lambda z: -(z.get("amt") or 0),
+           "turn": lambda z: -(z.get("turn") or 0)}.get(sort_by, lambda z: -z["gap"])
+    ok.sort(key=key)
 
-    def amt(k):
-        return ("　≈ %s 元/份" % format(round(unit), ",")) if unit else ""
-
-    lines = ["**%s 竞价定档（09:25）**" % date, ""]
-    if L3:
-        lines.append("🔴 **L3 超跌反核**")
-        for i, x in enumerate(L3, 1):
-            lines.append("%s%d. %s(%s) 竞价 **%+.2f%%**" % ("👉 " if i == 1 else "　　", i,
-                                                        full_name(x["code"], x["name"]), x["code"], x["gap"]))
-        lines.append("")
+    lines = ["**%s 竞价排名（09:25%s）**" % (date, "｜按" + {"gap": "涨幅", "amt": "金额",
+                                                       "turn": "换手"}[sort_by] + "排序"), ""]
+    for i, x in enumerate(ok[:top], 1):
+        marks = []
+        if x.get("ai") == "bull":
+            marks.append("✅多")
+        elif x.get("ai") == "neutral":
+            marks.append("·中性")
+        if x.get("tier"):
+            marks.append(x["tier"])
+        if x.get("code") in {y["code"] for y in l3_cands}:
+            marks.append("🔴L3")
+        lines.append("　%d. **%s**(%s) %s 竞价 **%+.2f%%** ｜ 额 %s ｜ 换手 %s ｜ %s" % (
+            i, full_name(x["code"], x.get("name")), x["code"], board(x["code"]),
+            x["gap"], _yi(x.get("amt")), _pct(x.get("turn")), " ".join(marks)))
+    if len(ok) > top:
+        lines.append("　…另有 %d 只" % (len(ok) - top))
     if veto:
-        lines.append("⛔ **AI 判空已排除**：%s" % "、".join(
-            "%s(%s)" % (full_name(x["code"], x["name"]), x["code"]) for x in veto))
         lines.append("")
-    if L1:
-        lines.append("📋 **L1 红牛看多（%d 只可买，按竞价排序）**" % len(L1))
-        for i, x in enumerate(L1[:8], 1):
-            mark = "👉 " if (i <= max(1, n_l1)) else "　　"
-            lines.append("%s%d. %s(%s) **%+.2f%%**" % (mark, i, full_name(x["code"], x["name"]),
-                                                     x["code"], x["gap"]))
-        if len(L1) > 8:
-            lines.append("　　…另有 %d 只" % (len(L1) - 8))
-        lines.append("")
-
-    # ---------- 执行清单 ----------
-    lines.append("**→ 今日买入（资金切 %d 份%s）**" % (split_n, amt(0)))
-    k = 0
-    if L3:
-        k += 1
-        x = L3[0]
-        lines.append("　%d. %s(%s) **1/%d 仓** —— L3" % (k, full_name(x["code"], x["name"]),
-                                                     x["code"], split_n))
-    for x in buy_l1:
-        k += 1
-        lines.append("　%d. %s(%s) **1/%d 仓** —— 竞价 %+.2f%%" % (
-            k, full_name(x["code"], x["name"]), x["code"], split_n, x["gap"]))
-    if not k:
-        lines.append("　· 今日无可买（全部 AI 判空或取不到竞价）")
-        return send_feishu(chr(10).join(lines))
-    if k < split_n:
-        lines.append("　（候选只够 %d 只，剩余 %d 份留现金）" % (k, split_n - k))
-    lines.append("")
-    lines.append("**卖点**：次日 14:55 全部卖出（隔日卖，T+1 合规）")
-    if L3:
-        lines.append("　· L3 那 1 份例外：D+1 收盘卖半仓、剩余半仓 D+2 收盘卖；盘中跌破成本 -5% 止损")
-    lines.append("　· 挂单：09:30 各挂涨停价买入（保成交）；资金不足一手则跳过该只")
-    lines.append("　· 历史（分仓前3只/隔日卖，56 天）：+551.9%｜日胜率 71.4%｜回撤 -19.3%")
+        lines.append("⛔ **AI 判空（红牛原文实为看空/出局）**")
+        for x in veto:
+            lines.append("　· %s(%s) 竞价 %s ｜ 额 %s ｜ 换手 %s" % (
+                full_name(x["code"], x.get("name")), x["code"],
+                ("%+.2f%%" % x["gap"]) if x.get("gap") is not None else "—",
+                _yi(x.get("amt")), _pct(x.get("turn"))))
+    if not ok:
+        lines.append("　（竞价数据取不到）")
     return send_feishu(chr(10).join(lines))
 
 
@@ -1027,8 +1023,7 @@ def main():
     ap.add_argument("--until", default="09:30")
     ap.add_argument("--l1-final", default="09:00", help="L1 定稿推送时间（默认 09:00）")
     ap.add_argument("--l1-incremental", action="store_true", help="预案到一条推一条（默认只在定稿时推一次）")
-    ap.add_argument("--split", type=int, default=SPLIT_N, help="资金切几份（分仓只数，默认 3）")
-    ap.add_argument("--capital", type=float, default=CAPITAL or 0, help="本金（用于显示每份金额，可选）")
+    ap.add_argument("--sort", default="gap", choices=["gap", "amt", "turn"], help="竞价排名排序依据")
     a = ap.parse_args()
 
     if a.test_send:
@@ -1042,8 +1037,7 @@ def main():
         return
     if a.loop:
         os.environ.setdefault("L1_FINAL_AT", a.l1_final)
-        globals()["SPLIT_N"] = a.split
-        globals()["CAPITAL"] = a.capital or None
+        globals()["SORT_BY"] = a.sort
         if a.l1_incremental:
             os.environ["L1_INCREMENTAL"] = "1"
         hh, mm = map(int, a.until.split(":"))
@@ -1059,7 +1053,7 @@ def main():
                         and (st.get("L3") or st.get("L1")) and datetime.now().strftime("%H:%M") >= "09:26"):
                     log("竞价定档推送（L3 %d 只 / L1 %d 只）" % (len(st.get("L3") or []), len(st.get("L1") or [])))
                     if send_auction(st["date"], list(st.get("L3") or []), list(st.get("L1") or []),
-                                    split_n=SPLIT_N, capital=CAPITAL):
+                                    sort_by=SORT_BY):
                         auction_done = True
                         st["auction_sent"] = True
                         json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
