@@ -49,7 +49,7 @@ def build_candidates():
     n2c = {str(v).zfill(6): k for k, v in raw.items()}
     cand = collections.defaultdict(list)
     dropped = 0
-    fx = os.path.join(ROOT, "data", "feishu", "hongniu", "plans_fixed.jsonl")
+    fx = os.environ.get("L1_PLANS") or os.path.join(ROOT, "data", "feishu", "hongniu", "plans_fixed.jsonl")
     for line in open(fx, encoding="utf-8"):
         x = json.loads(line)
         if x["polarity"] != "bull":

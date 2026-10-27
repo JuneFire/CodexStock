@@ -52,10 +52,10 @@ REVERSE_WORDS = ("反核", "次弱", "地板", "跌停开", "低吸", "反包", 
 BULL = ["低吸", "买入", "参与", "上车", "加仓", "一字", "卡位", "空间", "反包", "套利", "溢价",
         "仓位", "做T", "隔夜", "新高", "补涨", "卡异动", "先手", "强锁", "弹性", "晋级", "顶一",
         "给到仓位", "存在空间", "可关注", "关注趋势", "预期", "冲高", "板", "顶", "尝试",
-        "可以做", "套利空间", "新高预期", "上限", "先手为主", "低接", "炸板低接", "做平台"]
+        "可以做", "套利空间", "新高预期", "上限", "低接", "炸板低接", "做平台"]
 BEAR = ["走人即可", "走人", "卖点", "止盈", "兑现", "回避", "断板", "放弃", "不参与", "冲高走",
         "减仓", "出局", "落袋", "不追", "放人", "高抛", "清仓", "无持续性", "只存在卖", "卡位失败",
-        "被卡", "跑路", "走弱", "控仓"]
+        "被卡", "跑路", "走弱", "控仓", "补跌", "杀跌", "走完", "出货", "停牌", "天地板"]
 BULL.sort(key=len, reverse=True)
 BEAR.sort(key=len, reverse=True)
 DEF_FENG = ("风标", "不代表标的", "多头较弱", "多头、空头")
@@ -374,6 +374,40 @@ def send_feishu(md):
     return ok
 
 
+C2N = {}
+
+
+TIER_STRONG = ("低吸", "买点", "买入", "打底", "埋伏", "加仓", "接回", "强锁", "恐慌吸", "水下吸")
+TIER_MID = ("反包", "修复", "转强", "套利", "空间", "新高", "补涨", "卡异动", "反核",
+            "换手板", "溢价", "止跌", "跟踪", "走强", "关注")
+
+
+def tier_tag(snippet):
+    """给推送里的每只票标：强/中/弱/否决（让人一眼看出红牛到底说没说买）"""
+    t = snippet or ""
+    if not t:
+        return "无原文"
+    if any(w in t for w in ("断板", "兑现", "补跌", "走弱", "清仓", "减仓", "走人", "走完", "不接")):
+        return "否决"
+    if any(w in t for w in TIER_STRONG):
+        return "强"
+    if any(w in t for w in TIER_MID):
+        return "中"
+    return "弱"
+
+
+def full_name(code, fallback=""):
+    """代码 → 全名（避免推送里出现「冰山」这种简称）"""
+    if not C2N:
+        try:
+            raw = json.load(open(gs.STOCKDICT, encoding="utf-8"))
+            for nm, c in raw.items():
+                C2N[str(c).zfill(6)] = nm
+        except Exception:
+            pass
+    return C2N.get(str(code).zfill(6)) or fallback or code
+
+
 def load_names():
     uniq, keys, name_of, short2 = gs.build_dict()
     raw = json.load(open(gs.STOCKDICT, encoding="utf-8"))
@@ -511,14 +545,15 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
     lines = ["**%s 预案信号预警**" % date, ""]
     # ---- L1：红牛预案看多主清单 ----
     lines.append("📋 **L1 红牛预案看多（%d 只）**" % len(A))
-    for c in sorted(A, key=lambda x: (hn_bull.get(x) or {}).get("name", "")):
-        nm = (hn_bull.get(c) or {}).get("name", c)
+    for c in sorted(A, key=lambda x: full_name(x, (hn_bull.get(x) or {}).get("name", ""))):
+        nm = full_name(c, (hn_bull.get(c) or {}).get("name", c))
         tag = ""
         if c in L3:
             tag = " 🔴L3"
         elif c in L5:
             tag = " 🟡L5"
-        lines.append("　· %s(%s)%s" % (nm, c, tag))
+        tt = tier_tag((hn_bull.get(c) or {}).get("snippet", ""))
+        lines.append("　· %s(%s) [%s]%s" % (nm, c, tt, tag))
     lines.append("　→ 执行：**09:25 竞价后选涨幅最高的一只，开盘满仓**；D+1 收盘卖（隔日卖）")
     lines.append("　→ 历史（T+1 合规，56 笔）：1 万 → 6.49 万 / **+548.6%** / 胜率 62.5% / 回撤 -19.4%")
     lines.append("")
@@ -536,10 +571,10 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
         lines.append("")
     if L5:
         lines.append("🟡 **L5 短线接力**")
-        lines.append("　" + fmt_list(L5, hn_bull, lq_bull, lq_bear))
-        for c in sorted(L5):
+        for c in sorted(L5, key=lambda x: full_name(x, x)):
+            nm = full_name(c, (lq_bull.get(c) or {}).get("name", c))
             lq_s = (lq_bull.get(c) or {}).get("snippet") or ""
-            lines.append("　· %s｜来去：%s" % (c, _flat(lq_s, 44)))
+            lines.append("　· %s(%s)｜来去：%s" % (nm, c, _flat(lq_s, 44)))
         lines.append("　→ 执行：**非一字或竞价额≥封单额×10%** 才买，持 3–5 日")
         lines.append("　→ 历史：可买子集 n=11，D+1 72.7% / D+5 +5.10%")
         lines.append("")
@@ -623,13 +658,13 @@ def send_auction(date, l3_cands, l1_cands):
         lines.append("🔴 **L3 超跌反核（优先）**")
         for i, x in enumerate(L3, 1):
             lines.append("%s%d. %s(%s) 竞价 **%+.2f%%**" % ("👉 " if i == 1 else "　　", i,
-                                                        x["name"], x["code"], x["gap"]))
+                                                        full_name(x["code"], x["name"]), x["code"], x["gap"]))
         lines.append("")
     if L1:
         lines.append("📋 **L1 红牛看多（%d 只，按竞价排序）**" % len(L1))
         for i, x in enumerate(L1[:10], 1):
             lines.append("%s%d. %s(%s) **%+.2f%%**" % ("👉 " if (i == 1 and not L3) else "　　",
-                                                     i, x["name"], x["code"], x["gap"]))
+                                                     i, full_name(x["code"], x["name"]), x["code"], x["gap"]))
         if len(L1) > 10:
             lines.append("　　…另有 %d 只" % (len(L1) - 10))
         lines.append("")
