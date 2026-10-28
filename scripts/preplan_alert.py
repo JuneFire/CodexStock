@@ -830,6 +830,17 @@ def last_run_summary():
         return {}
 
 
+LIMIT_PCT = {"10cm": 10.0, "20cm": 20.0, "30cm": 30.0}
+
+
+def is_one_word(x):
+    """涨停开盘（一字/涨停价开）= 买不到"""
+    gap = x.get("gap")
+    if gap is None:
+        return False
+    return gap >= LIMIT_PCT.get(x.get("_board"), 10.0) - 0.15
+
+
 def _yi(v):
     """金额（亿元）→ 易读字符串"""
     if not v:
@@ -871,6 +882,8 @@ def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
         return "10cm"
 
     veto = [x for x in allx if x.get("ai") == "bear"]
+    for x in allx:
+        x["_board"] = board(x["code"])
     ok = [x for x in allx if x.get("gap") is not None and x.get("ai") != "bear"]
     key = {"amt": lambda z: -(z.get("amt") or 0),
            "turn": lambda z: -(z.get("turn") or 0)}.get(sort_by, lambda z: -z["gap"])
@@ -880,6 +893,8 @@ def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
                                                        "turn": "换手"}[sort_by] + "排序"), ""]
     for i, x in enumerate(ok[:top], 1):
         marks = []
+        if is_one_word(x):
+            marks.append("🔒一字(买不到)")
         if x.get("ai") == "bull":
             marks.append("✅多")
         elif x.get("ai") == "neutral":
@@ -901,7 +916,13 @@ def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
                 full_name(x["code"], x.get("name")), x["code"],
                 ("%+.2f%%" % x["gap"]) if x.get("gap") is not None else "—",
                 _yi(x.get("amt")), _pct(x.get("turn"))))
-    if not ok:
+    buyable = [x for x in ok if not is_one_word(x)]
+    lines.append("")
+    if ok and not buyable:
+        lines.append("⚠️ **今日候选全部涨停开盘（一字），无一可买 → 空仓**")
+    elif ok:
+        lines.append("可买 %d 只（已剔除 🔒一字）" % len(buyable))
+    else:
         lines.append("　（竞价数据取不到）")
     return send_feishu(chr(10).join(lines))
 
@@ -1000,26 +1021,20 @@ def once(dry_run=False, date=None, send=True):
     hn_bull, hn_bear, hn_notes, hn_fk = parse_plans(texts["hn"], (n2c, keys))
     lq_bull, lq_bear, lq_notes, lq_fk = parse_plans(texts["lq"], (n2c, keys)) if texts["lq"] else ({}, {}, [], {"bull": {}, "bear": {}})
 
-    # ---- L1：AI 扩围（所有被点名的票都送 AI，不只规则判多的）----
-    mentions = collect_mentions(texts["hn"], n2c, keys)
-    audit = ai_audit([(c, nm, sn) for c, (nm, sn) in mentions.items()])
-    ai_bull = {c for c, (v, _w) in audit.items() if v == "bull"}
-    ai_veto = {c for c, (v, _w) in audit.items() if v == "bear"}
-    for c in ai_bull:                      # AI 新增的看多票补进 hn_bull（L1/L3 共用）
-        if c not in hn_bull and c in mentions:
-            nm, sn = mentions[c]
-            hn_bull[c] = {"name": nm, "section": "other", "snippet": sn, "src": "ai:audit"}
-    L1_set0 = (set(hn_bull) | ai_bull) - set(hn_bear) - ai_veto
-    log("点名 %d 只 → AI 判多 %d / 判空 %d｜规则多 %d / 空 %d → L1 %d 只"
-        % (len(mentions), len(ai_bull), len(ai_veto), len(hn_bull), len(hn_bear), len(L1_set0)))
+    # ---- L1：严格用词表（v1）判定。AI 只做复核标注/否决，不扩围（2026-10-28 定案）----
+    rule_bull = set(hn_bull) - set(hn_bear)
+    audit = ai_audit([(c, (hn_bull.get(c) or {}).get("name", c),
+                       (hn_bull.get(c) or {}).get("snippet", "")) for c in sorted(rule_bull)])
+    ai_veto = {c for c in rule_bull if (audit.get(c) or ("", ""))[0] == "bear"}
+    L1_set0 = rule_bull - ai_veto
+    log("词表看多 %d 只 → AI 判空 %d 只 → L1 %d 只" % (len(rule_bull), len(ai_veto), len(L1_set0)))
     st_l1 = last_run_summary()
     if st_l1.get("date") != today:
         st_l1 = {"date": today}
-    st_l1["veto"] = [{"code": c, "name": full_name(c, (mentions.get(c) or ("", ""))[0]),
+    st_l1["veto"] = [{"code": c, "name": full_name(c, (hn_bull.get(c) or {}).get("name", c)),
                       "why": (audit.get(c) or ("", ""))[1],
-                      "snip": (mentions.get(c) or ("", ""))[1][:50]} for c in sorted(ai_veto)]
-    st_l1["neutral"] = [{"code": c, "name": full_name(c, (mentions.get(c) or ("", ""))[0])}
-                        for c in sorted(set(audit) - ai_bull - ai_veto - set(L1_set0))]
+                      "snip": ((hn_bull.get(c) or {}).get("snippet") or "")[:50]}
+                     for c in sorted(ai_veto)]
     pushed = set(st_l1.get("l1_pushed") or [])
     items = []
     for c in sorted(L1_set0, key=lambda x: full_name(x, x)):
@@ -1078,16 +1093,13 @@ def once(dry_run=False, date=None, send=True):
     st1["L1"] = []
     for c in sorted(L1_set):
         rec = hn_bull.get(c) or {}
-        mn = (mentions.get(c) or ("", ""))
-        nm = rec.get("name") or mn[0] or c
-        sn = rec.get("snippet") or mn[1] or ""
-        st1["L1"].append({"code": c, "name": full_name(c, nm), "gap": None,
+        sn = rec.get("snippet") or ""
+        st1["L1"].append({"code": c, "name": full_name(c, rec.get("name") or c), "gap": None,
                           "ai": (audit.get(c) or ("", ""))[0],
                           "tier": tier_tag(sn), "hn": sn[:50]})
-    st1["neutral"] = list(st1.get("neutral") or [])
-    st1["veto"] = [{"code": c, "name": full_name(c, (mentions.get(c) or ("", ""))[0]),
+    st1["veto"] = [{"code": c, "name": full_name(c, (hn_bull.get(c) or {}).get("name", c)),
                     "why": (audit.get(c) or ("", ""))[1],
-                    "snip": (mentions.get(c) or ("", ""))[1][:50]}
+                    "snip": ((hn_bull.get(c) or {}).get("snippet") or "")[:50]}
                    for c in sorted(ai_veto)]
     log("候选：L1 %d 只 / L3 %d 只（L5 已下线）" % (len(L1_set), len(L3_set)))
     st1.update({"hn": {"msgs": stat["hn"]["msgs"], "plans": len(texts["hn"]),
