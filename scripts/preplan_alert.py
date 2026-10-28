@@ -757,6 +757,14 @@ def send_l1_update(date, items, added, version, final=False, veto=None):
         if x.get("snip"):
             lines.append("　　　原文：%s" % x["snip"][:52])
     ok = [x for x in items if x.get("ai") != "bear"]
+    if veto:
+        lines.append("")
+        lines.append("⛔ **AI 判空（红牛点名但实为看空/离场，不进候选）**")
+        for x in veto:
+            lines.append("　· %s(%s)%s" % (x["name"], x["code"],
+                                           ("｜" + x["why"]) if x.get("why") else ""))
+            if x.get("snip"):
+                lines.append("　　　原文：%s" % x["snip"][:50])
     lines.append("")
     if final:
         lines.append("**→ 09:25 竞价结束后会再推一条「竞价排名」**（涨幅/金额/换手），自行决定买哪只")
