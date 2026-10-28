@@ -1019,7 +1019,7 @@ def once(dry_run=False, date=None, send=True):
                       "why": (audit.get(c) or ("", ""))[1],
                       "snip": (mentions.get(c) or ("", ""))[1][:50]} for c in sorted(ai_veto)]
     st_l1["neutral"] = [{"code": c, "name": full_name(c, (mentions.get(c) or ("", ""))[0])}
-                        for c in sorted(set(audit) - ai_bull - ai_veto)]
+                        for c in sorted(set(audit) - ai_bull - ai_veto - set(L1_set0))]
     pushed = set(st_l1.get("l1_pushed") or [])
     items = []
     for c in sorted(L1_set0, key=lambda x: full_name(x, x)):
@@ -1084,6 +1084,7 @@ def once(dry_run=False, date=None, send=True):
         st1["L1"].append({"code": c, "name": full_name(c, nm), "gap": None,
                           "ai": (audit.get(c) or ("", ""))[0],
                           "tier": tier_tag(sn), "hn": sn[:50]})
+    st1["neutral"] = list(st1.get("neutral") or [])
     st1["veto"] = [{"code": c, "name": full_name(c, (mentions.get(c) or ("", ""))[0]),
                     "why": (audit.get(c) or ("", ""))[1],
                     "snip": (mentions.get(c) or ("", ""))[1][:50]}
