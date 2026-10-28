@@ -186,7 +186,9 @@ def quotes(codes):
                          "vol": _f(6),                    # 成交量(手)，09:25 时=竞价量
                          "amt": (_f(37) or 0) / 1e4,      # 成交额(亿元)，09:25 时=竞价额
                          "turn": _f(38),                  # 换手率(%)，09:25 时=竞价换手
-                         "fcap": _f(44)}                  # 流通市值(亿)
+                         "fcap": _f(44),                  # 流通市值(亿)
+                         "b1": _f(9),                     # 买一价（一字时=涨停价）
+                         "b1v": _f(10)}                   # 买一量(手)＝封单量
     # 兜底：东财单只
     missing = [c for c in codes if str(c).zfill(6) not in out]
     for c in missing:

@@ -841,6 +841,21 @@ def is_one_word(x):
     return gap >= LIMIT_PCT.get(x.get("_board"), 10.0) - 0.15
 
 
+def one_word_info(x):
+    """一字/涨停开盘的可买性：竞价额 ≥ 封单额×10% → 可挂到
+
+    返回 (是否一字, 封单额亿, 竞价额亿, 比例文本, 能否买到)
+    """
+    if not is_one_word(x):
+        return (False, None, None, "", None)
+    amt = x.get("amt") or 0                     # 竞价成交额(亿)
+    seal = ((x.get("b1") or 0) * (x.get("b1v") or 0) * 100) / 1e8   # 封单额(亿)
+    if seal <= 0:
+        return (True, None, amt, "封单缺失", None)
+    ratio = amt / seal
+    return (True, seal, amt, "%.1f%%" % (ratio * 100), ratio >= 0.10)
+
+
 def _yi(v):
     """金额（亿元）→ 易读字符串"""
     if not v:
@@ -893,8 +908,14 @@ def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
                                                        "turn": "换手"}[sort_by] + "排序"), ""]
     for i, x in enumerate(ok[:top], 1):
         marks = []
-        if is_one_word(x):
-            marks.append("🔒一字(买不到)")
+        one, seal, amt, ratio, okk = one_word_info(x)
+        if one:
+            if okk is False:
+                marks.append("🔒一字·封死(竞价比%s)" % ratio)
+            elif okk is True:
+                marks.append("🔒一字·可挂到(竞价比%s)" % ratio)
+            else:
+                marks.append("🔒一字(%s)" % (ratio or "无封单数据"))
         if x.get("ai") == "bull":
             marks.append("✅多")
         elif x.get("ai") == "neutral":
@@ -916,10 +937,17 @@ def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
                 full_name(x["code"], x.get("name")), x["code"],
                 ("%+.2f%%" % x["gap"]) if x.get("gap") is not None else "—",
                 _yi(x.get("amt")), _pct(x.get("turn"))))
-    buyable = [x for x in ok if not is_one_word(x)]
+    buyable = [x for x in ok if not is_one_word(x) or one_word_info(x)[4]]
     lines.append("")
+    ones = [x for x in ok if is_one_word(x)]
+    if ones:
+        for x in ones:
+            one, seal, amt, ratio, okk = one_word_info(x)
+            lines.append("　🔒 %s 封单 **%s** ｜ 竞价额 %s ｜ 比例 **%s** → %s" % (
+                x.get("name") or x["code"], _yi(seal), _yi(amt), ratio or "—",
+                "可挂到" if okk else ("封死买不到" if okk is False else "数据不足")))
     if ok and not buyable:
-        lines.append("⚠️ **今日候选全部涨停开盘（一字），无一可买 → 空仓**")
+        lines.append("⚠️ **今日候选全部涨停开盘且封死，无一可买 → 空仓**")
     elif ok:
         lines.append("可买 %d 只（已剔除 🔒一字）" % len(buyable))
     else:
