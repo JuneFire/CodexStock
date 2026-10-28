@@ -622,6 +622,35 @@ _AUDIT_SYS = (
 )
 
 
+def collect_mentions(texts, n2c, keys, window=60):
+    """把预案里**所有被点名的票**捞出来（不判方向），交给 AI 判。
+
+    返回 {code: (name, snippet)}；snippet = 名字 + 之后最多 60 字（截到下一只票名）
+    """
+    out = {}
+    for _t, body in texts:
+        if not body:
+            continue
+        pos = name_positions(body, keys)
+        if not pos:
+            continue
+        for p, ln, nm in pos:
+            code = n2c.get(nm)
+            if not code:
+                continue
+            end = min(p + ln + window, len(body))
+            nxt = [q for q, _l, _n in pos if q > p + ln]
+            if nxt:
+                end = min(end, min(nxt))
+            snip = body[p:end].replace(chr(10), " ").strip()
+            if len(snip) < len(nm) + 2:
+                continue
+            old = out.get(code)
+            if old is None or len(snip) > len(old[1]):
+                out[code] = (nm, snip[:140])
+    return out
+
+
 def _audit_cache_load():
     try:
         return json.load(open(AUDIT_CACHE, encoding="utf-8"))
@@ -691,8 +720,8 @@ def ai_audit(items):
 TIER_MARK = {"bull": "✅多", "bear": "⛔空", "neutral": "·中性"}
 
 
-def send_l1_update(date, items, added, version, final=False):
-    """L1 分批推送。items: [{code,name,tier,tag,why}]；added: 本次新增的 code 列表"""
+def send_l1_update(date, items, added, version, final=False, veto=None):
+    """L1 推送。items: [{code,name,tier,ai,why,snip}]；veto: AI 判空的票（只展示，不进候选）"""
     head = ("**%s L1 红牛看多·定稿（%s）**" % (date, datetime.now().strftime("%H:%M"))
             if final else
             "**%s L1 红牛看多·更新 #%d（%s）**" % (date, version, datetime.now().strftime("%H:%M")))
@@ -946,13 +975,24 @@ def once(dry_run=False, date=None, send=True):
     hn_bull, hn_bear, hn_notes, hn_fk = parse_plans(texts["hn"], (n2c, keys))
     lq_bull, lq_bear, lq_notes, lq_fk = parse_plans(texts["lq"], (n2c, keys)) if texts["lq"] else ({}, {}, [], {"bull": {}, "bear": {}})
 
-    # ---- L1 分批推送（红牛看多，AI 逐只复核，09:10 定稿）----
-    L1_set0 = set(hn_bull) - set(hn_bear)
-    audit = ai_audit([(c, (hn_bull.get(c) or {}).get("name", c),
-                       (hn_bull.get(c) or {}).get("snippet", "")) for c in sorted(L1_set0)])
+    # ---- L1：AI 扩围（所有被点名的票都送 AI，不只规则判多的）----
+    mentions = collect_mentions(texts["hn"], n2c, keys)
+    audit = ai_audit([(c, nm, sn) for c, (nm, sn) in mentions.items()])
+    ai_bull = {c for c, (v, _w) in audit.items() if v == "bull"}
+    ai_veto = {c for c, (v, _w) in audit.items() if v == "bear"}
+    for c in ai_bull:                      # AI 新增的看多票补进 hn_bull（L1/L3 共用）
+        if c not in hn_bull and c in mentions:
+            nm, sn = mentions[c]
+            hn_bull[c] = {"name": nm, "section": "other", "snippet": sn, "src": "ai:audit"}
+    L1_set0 = (set(hn_bull) | ai_bull) - set(hn_bear) - ai_veto
+    log("点名 %d 只 → AI 判多 %d / 判空 %d｜规则多 %d / 空 %d → L1 %d 只"
+        % (len(mentions), len(ai_bull), len(ai_veto), len(hn_bull), len(hn_bear), len(L1_set0)))
     st_l1 = last_run_summary()
     if st_l1.get("date") != today:
         st_l1 = {"date": today}
+    st_l1["veto"] = [{"code": c, "name": full_name(c, (mentions.get(c) or ("", ""))[0]),
+                      "why": (audit.get(c) or ("", ""))[1],
+                      "snip": (mentions.get(c) or ("", ""))[1][:50]} for c in sorted(ai_veto)]
     pushed = set(st_l1.get("l1_pushed") or [])
     items = []
     for c in sorted(L1_set0, key=lambda x: full_name(x, x)):
@@ -971,7 +1011,8 @@ def once(dry_run=False, date=None, send=True):
     gap_ok = (not last_ts) or (time.time() - float(last_ts) > 90)
     if send and (do_final or (incremental and added)) and gap_ok:
         ver += 1
-        if send_l1_update(today, items, added, ver, final=do_final):
+        if send_l1_update(today, items, added, ver, final=do_final,
+                          veto=st_l1.get("veto") or []):
             st_l1.update({"l1_ver": ver, "l1_pushed": sorted(set(pushed) | set(x["code"] for x in items)),
                           "l1_last_ts": time.time(), "l1_count": len(items),
                           "l1_final": True if do_final else st_l1.get("l1_final", False)})
@@ -1007,11 +1048,19 @@ def once(dry_run=False, date=None, send=True):
                   "gap": None, "hn": (hn_bull.get(c) or {}).get("snippet", "")[:50]}
                  for c in sorted(L3_set)]
     L1_set = set(hn_bull) - set(hn_bear)
-    st1["L1"] = [{"code": c, "name": full_name(c, (hn_bull.get(c) or {}).get("name", c)),
-                  "gap": None, "ai": (audit.get(c) or ("", ""))[0],
-                  "tier": tier_tag((hn_bull.get(c) or {}).get("snippet", "")),
-                  "hn": (hn_bull.get(c) or {}).get("snippet", "")[:50]}
-                 for c in sorted(L1_set)]
+    st1["L1"] = []
+    for c in sorted(L1_set):
+        rec = hn_bull.get(c) or {}
+        mn = (mentions.get(c) or ("", ""))
+        nm = rec.get("name") or mn[0] or c
+        sn = rec.get("snippet") or mn[1] or ""
+        st1["L1"].append({"code": c, "name": full_name(c, nm), "gap": None,
+                          "ai": (audit.get(c) or ("", ""))[0],
+                          "tier": tier_tag(sn), "hn": sn[:50]})
+    st1["veto"] = [{"code": c, "name": full_name(c, (mentions.get(c) or ("", ""))[0]),
+                    "why": (audit.get(c) or ("", ""))[1],
+                    "snip": (mentions.get(c) or ("", ""))[1][:50]}
+                   for c in sorted(ai_veto)]
     log("候选：L1 %d 只 / L3 %d 只（L5 已下线）" % (len(L1_set), len(L3_set)))
     st1.update({"hn": {"msgs": stat["hn"]["msgs"], "plans": len(texts["hn"]),
                        "bull": len(hn_bull), "bear": len(hn_bear)},
