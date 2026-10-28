@@ -733,7 +733,7 @@ def ai_audit(items):
 TIER_MARK = {"bull": "✅多", "bear": "⛔空", "neutral": "·中性"}
 
 
-def send_l1_update(date, items, added, version, final=False, veto=None):
+def send_l1_update(date, items, added, version, final=False, veto=None, neutral=None):
     """L1 推送。items: [{code,name,tier,ai,why,snip}]；veto: AI 判空的票（只展示，不进候选）"""
     head = ("**%s L1 红牛看多·定稿（%s）**" % (date, datetime.now().strftime("%H:%M"))
             if final else
@@ -757,6 +757,10 @@ def send_l1_update(date, items, added, version, final=False, veto=None):
         if x.get("snip"):
             lines.append("　　　原文：%s" % x["snip"][:52])
     ok = [x for x in items if x.get("ai") != "bear"]
+    if neutral:
+        lines.append("")
+        lines.append("· **中性/条件未定**：%s" % "、".join(
+            "%s(%s)" % (x["name"], x["code"]) for x in neutral))
     if veto:
         lines.append("")
         lines.append("⛔ **AI 判空（红牛点名但实为看空/离场，不进候选）**")
@@ -1014,6 +1018,8 @@ def once(dry_run=False, date=None, send=True):
     st_l1["veto"] = [{"code": c, "name": full_name(c, (mentions.get(c) or ("", ""))[0]),
                       "why": (audit.get(c) or ("", ""))[1],
                       "snip": (mentions.get(c) or ("", ""))[1][:50]} for c in sorted(ai_veto)]
+    st_l1["neutral"] = [{"code": c, "name": full_name(c, (mentions.get(c) or ("", ""))[0])}
+                        for c in sorted(set(audit) - ai_bull - ai_veto)]
     pushed = set(st_l1.get("l1_pushed") or [])
     items = []
     for c in sorted(L1_set0, key=lambda x: full_name(x, x)):
@@ -1033,7 +1039,7 @@ def once(dry_run=False, date=None, send=True):
     if send and (do_final or (incremental and added)) and gap_ok:
         ver += 1
         if send_l1_update(today, items, added, ver, final=do_final,
-                          veto=st_l1.get("veto") or []):
+                          veto=st_l1.get("veto") or [], neutral=st_l1.get("neutral") or []):
             st_l1.update({"l1_ver": ver, "l1_pushed": sorted(set(pushed) | set(x["code"] for x in items)),
                           "l1_last_ts": time.time(), "l1_count": len(items),
                           "l1_final": True if do_final else st_l1.get("l1_final", False)})
