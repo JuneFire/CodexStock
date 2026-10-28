@@ -2191,10 +2191,32 @@ def _run_auction_top_sample():
         if not ok:
             print("[auction-top] %s，跳过落盘" % msg, flush=True)
             return
+        print("[auction-top] 腾讯源落盘（%d 条）" % len(snap["records"]), flush=True)
+        # 悟道增强：腾讯快照在 09:25:0x 常还没刷新成交额，导致竞价额最大的若干只被
+        # amount<=0 过滤掉（实测漏 3~19 只）；且腾讯没有题材/连板/尾秒。
+        # 这里只做「补票 + 补字段」，失败绝不影响主链路（内部已兜住异常）。
+        merge = None
+        try:
+            try:
+                from wudao_feed import fetch_and_merge
+            except Exception:
+                from backend.wudao_feed import fetch_and_merge
+            merge = fetch_and_merge
+        except Exception as exc:
+            print("[auction-top] 悟道模块不可用: %r" % (exc,), flush=True)
+        if merge is not None:
+            merged, stats = merge(snap["records"], snap["date"])
+            if stats.get("error"):
+                print("[auction-top] 悟道增强跳过: %s" % stats["error"], flush=True)
+            else:
+                snap["records"] = merged
+                ok2, _ = save_auction_top_file(snap)
+                print("[auction-top] 悟道增强 OK：腾讯 %d + 新增 %d = %d 只（补字段 %d 只）%s" % (
+                    stats["tencent"], stats["added"], stats["total"], stats["enriched"],
+                    "" if ok2 else "（重写文件失败）"), flush=True)
         # 文件归档是权威降级源；同时写 MySQL，数据库不可用只记日志不影响页面
         if not db.save_auction_top(snap["records"]):
             print("[auction-top] MySQL 入库失败: %s" % db.last_error(), flush=True)
-        print("[auction-top] 竞价额榜单落盘（%d 条）" % len(snap["records"]), flush=True)
     except Exception as exc:
         print("[auction-top] 抓取失败: %r" % exc, flush=True)
 
