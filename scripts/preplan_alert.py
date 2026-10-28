@@ -93,9 +93,22 @@ def lark(*args, timeout=90):
         return {"ok": False, "raw": out[:400], "err": err[:400], "rc": rc}
 
 
+_CJK_GAP = re.compile(r"(?<=[一-鿿])[ 	　]+(?=[一-鿿])")
+
+
 def norm(text):
-    """统一清洗：去标签/零宽字符 + 反混淆（mǎi→买、bαn→板、苍→仓…）"""
-    return gs.clean(text or "")
+    """统一清洗：去标签/零宽字符 + 反混淆（mǎi→买、bαn→板、苍→仓…）
+
+    额外：吞掉汉字之间的空格——OCR 常把「桂发祥」切成「桂发 祥」、「跟 踪」，
+    不清掉会导致股票名匹配失败、关键词（买点/反核）漏命中。
+    """
+    t = gs.clean(text or "")
+    for _ in range(3):                 # 连续多次，处理「桂 发 祥」这类
+        t2 = _CJK_GAP.sub("", t)
+        if t2 == t:
+            break
+        t = t2
+    return t
 
 
 def recent_messages(chat_id, count=20):
