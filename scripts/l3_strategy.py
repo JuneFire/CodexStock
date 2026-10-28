@@ -44,7 +44,7 @@ def load_all():
         p = json.loads(line)
         plans[p["key"]] = p
     hn, hnb, htxt = collections.defaultdict(set), collections.defaultdict(set), {}
-    fx = os.path.join(ROOT, "data", "feishu", "hongniu", "plans_fixed.jsonl")
+    fx = os.environ.get("L3_PLANS") or os.path.join(ROOT, "data", "feishu", "hongniu", "plans_fixed.jsonl")
     for line in open(fx, encoding="utf-8"):
         x = json.loads(line)
         if x["polarity"] == "bull":
