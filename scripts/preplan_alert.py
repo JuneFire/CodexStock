@@ -14,7 +14,7 @@
        L3 = 红牛看多 ∩ 来去看空(空头风标) ∩ 红牛原文含"反核/次弱/地板/跌停开/低吸/反包"
        L5 = 红牛看多 ∩ 来去【短线方面】看多（2026-10-27 已下线，见 reports/L5回测_20261027.md）
        L1 = 红牛看多（仅统计用）
-  4) 09:00 推 L1 定稿、09:26 推竞价排名；有 L3 时在两条里标 🔴L3
+  4) 09:10 推 L1 定稿（竞价 09:15 前留 5 分钟决策）、09:26 推竞价排名；有 L3 时在两条里标 🔴L3
 """
 import argparse
 import io
@@ -1048,7 +1048,7 @@ def send_fallback(date, summary):
         lines.append("　可能原因：预案改成了新格式（非图片/非标准文本）、群消息被撤、或发送时间晚于 09:20")
         lines.append("　→ 请顺手看一眼两个群，我按需调整解析规则")
     else:
-        lines.append("两家预案已解析成功，但**今天没有 L3 信号**（L1 清单见 09:00 定稿）")
+        lines.append("两家预案已解析成功，但**今天没有 L3 信号**（L1 清单见 09:10 定稿）")
         lines.append("　红牛 多%s / 空%s；来去 多%s / 空%s（风标 空%s）"
                      % (hn.get("bull", 0), hn.get("bear", 0), lq.get("bull", 0), lq.get("bear", 0),
                         summary.get("fk_bear", 0)))
@@ -1156,7 +1156,7 @@ def once(dry_run=False, date=None, send=True):
     added = [x["code"] for x in items if x["code"] not in pushed]
     now_hm = datetime.now().strftime("%H:%M")
     last_ts = st_l1.get("l1_last_ts") or ""
-    final_at = os.environ.get("L1_FINAL_AT", "09:00")
+    final_at = os.environ.get("L1_FINAL_AT", "09:10")
     ver = int(st_l1.get("l1_ver") or 0)
     do_final = bool(items) and now_hm >= final_at and not st_l1.get("l1_final")
     incremental = os.environ.get("L1_INCREMENTAL", "0").strip() in ("1", "true", "yes")
@@ -1268,7 +1268,7 @@ def main():
     ap.add_argument("--no-send", action="store_true")
     ap.add_argument("--interval", type=int, default=300, help="平时轮询间隔秒（09:20 后自动 30s）")
     ap.add_argument("--until", default="09:30")
-    ap.add_argument("--l1-final", default="09:00", help="L1 定稿推送时间（默认 09:00）")
+    ap.add_argument("--l1-final", default="09:10", help="L1 定稿推送时间（默认 09:10，09:15 竞价开始前）")
     ap.add_argument("--l1-incremental", action="store_true", help="预案到一条推一条（默认只在定稿时推一次）")
     ap.add_argument("--preflight", action="store_true", help="07:00 自检（飞书/AI/行情）")
     ap.add_argument("--auction-now", action="store_true", help="立即发一次竞价排名（09:26 兜底）")

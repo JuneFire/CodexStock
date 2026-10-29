@@ -50,9 +50,12 @@ echo "  服务器上需一次性授权"读取"权限（不需要管理员）："
 echo "    lark-cli auth login --scope \"im:message.readonly\" --no-wait --json"
 echo "    手机扫码 → lark-cli auth login --device-code <code>"
 
-echo "== 5. cron（每交易日 08:30 启动，循环到 09:20）=="
-CRON_LINE="30 7 * * 1-5 cd $REPO_ROOT && PREPLAN_AI=1 $VENV/bin/python scripts/preplan_alert.py --loop --until 09:35 --l1-final 09:00 --interval 300 >> logs/preplan_alert.log 2>&1"
-( crontab -l 2>/dev/null | grep -v preplan_alert || true; echo "$CRON_LINE" ) | crontab -
+echo "== 5. cron（每交易日 07:00 自检 / 07:30 起循环到 09:35，09:10 出 L1 定稿 / 09:12 兜底 / 09:28 竞价排名）=="
+CRON_1="0 7 * * 1-5 cd $REPO_ROOT && PREPLAN_AI=1 $VENV/bin/python scripts/preplan_alert.py --preflight >> logs/preplan_alert.log 2>&1"
+CRON_2="30 7 * * 1-5 cd $REPO_ROOT && PREPLAN_AI=1 $VENV/bin/python scripts/preplan_alert.py --loop --until 09:35 --l1-final 09:10 --interval 300 --sort gap >> logs/preplan_alert.log 2>&1"
+CRON_3="12 9 * * 1-5 cd $REPO_ROOT && PREPLAN_AI=1 $VENV/bin/python scripts/preplan_alert.py --once --sort gap >> logs/preplan_alert.log 2>&1"
+CRON_4="28 9 * * 1-5 cd $REPO_ROOT && PREPLAN_AI=1 $VENV/bin/python scripts/preplan_alert.py --auction-now --sort gap >> logs/preplan_alert.log 2>&1"
+( crontab -l 2>/dev/null | grep -v preplan_alert || true; echo "$CRON_1"; echo "$CRON_2"; echo "$CRON_3"; echo "$CRON_4" ) | crontab -
 crontab -l | tail -2
 
 echo "== 6. 自检 =="
