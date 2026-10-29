@@ -1151,8 +1151,12 @@ def once(dry_run=False, date=None, send=True):
             st = {}
     import hashlib as _h
     md_hash = _h.sha1(md.encode("utf-8")).hexdigest()[:16]
-    if st.get("date") == today and st.get("sent_hash") == md_hash:
-        log("已推送过，跳过")
+    l3_key = ",".join(sorted(L3_set))
+    if st.get("date") == today and st.get("l3_key") == l3_key:
+        log("L3 股票集合未变，跳过（避免预案补发导致重复推送）")
+        return md
+    if datetime.now().strftime("%H:%M") >= "09:26":
+        log("已过 09:26（竞价定档已推），L3 不再补发")
         return md
     if not send:
         log("（--no-send）不推送，仅输出")
@@ -1160,6 +1164,7 @@ def once(dry_run=False, date=None, send=True):
     if send_feishu(md):
         st["date"] = today
         st["sent_hash"] = md_hash
+        st["l3_key"] = l3_key
         json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
     return md
 
