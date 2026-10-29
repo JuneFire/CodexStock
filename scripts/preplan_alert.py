@@ -424,7 +424,7 @@ def extract_views(texts, keys, limit=5, maxlen=46):
     for item in texts:
         t = item if isinstance(item, str) else (item[1] if len(item) > 1 else "")
         for ln in re.split("[。；，,、（）()" + chr(10) + "]", t or ""):
-            seg = ln.strip(" 　·-—*:：")
+            seg = re.sub(r"^[0-9０-９]{1,2}\s*[.、)）]", "", ln).strip(" 　·-—*:：")
             if not (6 <= len(seg) <= maxlen):
                 continue
             if any(k in seg for k in keys):        # 含个股名 → 个股句，不收
