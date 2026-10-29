@@ -743,19 +743,34 @@ def send_l1_update(date, items, added, version, final=False, veto=None, neutral=
         names = [x["name"] for x in items if x["code"] in added]
         lines.append("🆕 新增 **%d 只**：%s" % (len(added), "、".join(names)))
         lines.append("")
+    # 档位必须明写：分布 + 含义 + 实测（否则看消息的人不知道红牛到底说没说买点）
+    if items:
+        cnt = {}
+        for x in items:
+            cnt[x.get("tier") or "无原文"] = cnt.get(x.get("tier") or "无原文", 0) + 1
+        dist = " / ".join("%s **%d** 只" % (t, cnt[t])
+                          for t in ("强", "中", "弱", "否决", "无原文") if cnt.get(t))
+        lines.append("**今日档位**：%s" % dist)
+        weak_only = all((x.get("tier") or "无原文") in ("弱", "无原文") for x in items)
+        if weak_only:
+            lines.append("⚠️ **全部为【弱】档或原文缺失档 —— 红牛没有给出明确买点（只是提到/条件句），"
+                         "不是可执行的看多信号。**")
+        lines.append("_档位=红牛措辞强度：强=明确买点｜中=较明确｜弱=仅提及或条件句｜否决=看空。"
+                     "**实测与次日收益无单调关系**（弱档 31 笔 +4.08%/胜 67.7%；中档 6 笔 -1.95%/胜 33.3%），"
+                     "只作措辞参考，不要据此加减仓。_")
+        lines.append("")
     for x in items:
         marks = []
-        if x.get("tier"):
-            marks.append("[%s]" % x["tier"])
         if x.get("ai"):
-            marks.append(TIER_MARK.get(x["ai"], ""))
+            marks.append(TIER_MARK.get(x.get("ai"), ""))
         if x.get("tag"):
             marks.append(x["tag"])
-        lines.append("　· %s(%s) %s" % (x["name"], x["code"], " ".join(m for m in marks if m)))
+        lines.append("　· **【%s】**%s(%s) %s" % (x.get("tier") or "无原文", x["name"], x["code"],
+                                                " ".join(m for m in marks if m)))
         if x.get("why"):
             lines.append("　　　AI：%s" % x["why"])
         if x.get("snip"):
-            lines.append("　　　原文：%s" % x["snip"][:52])
+            lines.append("　　　原文：…%s" % x["snip"][:52])
     ok = [x for x in items if x.get("ai") != "bear"]
     if neutral:
         lines.append("")
@@ -906,6 +921,14 @@ def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
 
     lines = ["**%s 竞价排名（09:25%s）**" % (date, "｜按" + {"gap": "涨幅", "amt": "金额",
                                                        "turn": "换手"}[sort_by] + "排序"), ""]
+    ty = {}
+    for x in ok:
+        ty[x.get("tier") or "无原文"] = ty.get(x.get("tier") or "无原文", 0) + 1
+    if ty:
+        lines.append("档位：" + " / ".join("%s %d" % (t, ty[t])
+                                          for t in ("强", "中", "弱", "否决", "无原文") if ty.get(t))
+                     + "　_（强=明确买点｜中=较明确｜弱=仅提及｜否决=看空；实测与收益无单调关系）_")
+        lines.append("")
     for i, x in enumerate(ok[:top], 1):
         marks = []
         one, seal, amt, ratio, okk = one_word_info(x)
@@ -921,7 +944,7 @@ def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
         elif x.get("ai") == "neutral":
             marks.append("·中性")
         if x.get("tier"):
-            marks.append(x["tier"])
+            marks.append("【%s】" % x["tier"])
         if x.get("code") in {y["code"] for y in l3_cands}:
             marks.append("🔴L3")
         lines.append("　%d. **%s**(%s) %s 竞价 **%+.2f%%** ｜ 额 %s ｜ 换手 %s ｜ %s" % (
