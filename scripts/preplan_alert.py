@@ -604,9 +604,10 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
     lines.append("")
     lines.append("**执行（L3 定稿口径）**")
     lines.append("　· 开盘买入；**D+1 起**盘中跌破买入价 **-5%** 止损（T+1，当日不能卖）")
-    lines.append("　· D+1 收盘卖 **半仓**，剩余半仓 D+2 收盘卖")
-    lines.append("　· 历史（满仓复利/未计费）：23 笔 +283.9%｜胜率 60.9%｜回撤 -10.1%")
-    lines.append("　· 与 L1 合并（有 L3 就做 L3）：52 笔 +1016.1%｜胜率 69.2%｜回撤 -14.3%")
+    lines.append("　· **D+1 尾盘涨停 → 一直持有到断板那天收盘卖**")
+    lines.append("　· D+1 未涨停 → 收盘卖 **半仓**，剩余半仓 D+2 收盘卖")
+    lines.append("　· 历史（满仓复利/未计费）：23 笔 +328.0%｜胜率 60.9%｜回撤 -9.8%")
+    lines.append("　· 与 L1 合并（有 L3 就做 L3）：50 笔 +1127.4%｜胜率 68.0%｜回撤 -14.3%")
     ai_cnt = sum(1 for d in (hn_bull, hn_bear, lq_bull, lq_bear)
                  for v in d.values() if str(v.get("src", "")).startswith("ai"))
     if ai_cnt:
@@ -811,9 +812,9 @@ def send_l1_update(date, items, added, version, final=False, veto=None, neutral=
     elif final and l3_items:
         lines.append("🔴 **L3 超跌反核**（红牛看多 × 来去看空）：%s" % "、".join(
             "%s(%s)" % (x["name"], x["code"]) for x in l3_items))
-        lines.append("　· 执行：开盘买｜**D+1 起**盘中跌破买入价 **-5%** 止损（T+1，当日不能卖）"
-                     "｜D+1 收盘卖半仓、剩余 D+2 收盘卖")
-        lines.append("　· **有 L3 优先做 L3**（合并回测 52 笔 +1016.1% / 胜 69.2% / 回撤 -14.3%，"
+        lines.append("　· 执行：开盘买｜**D+1 起**盘中跌破买入价 **-5%** 止损（T+1，当日不能卖）")
+        lines.append("　· **D+1 尾盘涨停→一直持有到断板那天收盘卖**；未涨停→D+1 收盘卖半仓 + 剩余 D+2 收盘卖")
+        lines.append("　· **有 L3 优先做 L3**（合并回测 50 笔 +1127.4% / 胜 68.0% / 回撤 -14.3%，"
                      "好于只做 L1 的 +548.6% / 胜 62.5% / 回撤 -19.4%）")
         lines.append("")
     elif final:

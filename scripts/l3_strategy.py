@@ -5,12 +5,15 @@
   候选：L3 = 红牛预案看多 ∩ 来去空头风标/看空 ∩ 红牛原文含反核词
   选票：当日多只候选 → 买【竞价涨幅最高】的一只
   入场：预案日开盘价（09:30 开盘买，满仓单票）
-  止损：-5%（A股 T+1，最早 D+1 才能卖；盘中触及即按 -5% 成交估算）
-  出场：D+1 收盘卖半仓 + 剩余半仓 D+2 收盘卖（最优变体）
+  止损：-5%（A股 T+1，D+1 起盘中才能止损；跳空低开时按开盘价成交）
+  出场：D+1 尾盘涨停 → 一直持有到断板日收盘卖
+        D+1 未涨停 → 收盘卖半仓 + 剩余半仓 D+2 收盘卖
   资金：单票满仓、复利；持仓期间出现的新信号跳过
 
 用法
   NO_NET=1 python scripts/l3_strategy.py --backtest
+  NO_NET=1 python scripts/l3_strategy.py --backtest --no-hold-limit   # 旧规则（只持到 D+2）
+  NO_NET=1 python scripts/l3_strategy.py --backtest --gap-fill        # 止损成交价取 min(止损价, 开盘价)
   NO_NET=1 python scripts/l3_strategy.py --quotes   # 今日候选 + 竞价涨幅排序（需 09:25 后）
 """
 import argparse
@@ -84,7 +87,29 @@ def candidates(n2c, hn, hnb, htxt, lq):
     return out
 
 
-def backtest(stop=0.05, half=True, remain_offset=1, capital=10000.0):
+def board_of(code):
+    c = str(code).zfill(6)
+    if c.startswith(("300", "301", "688", "689")):
+        return "20cm"
+    if c.startswith(("4", "8", "92")):
+        return "30cm"
+    return "10cm"
+
+
+def cap_pct(code):
+    return {"20cm": 20.0, "30cm": 30.0}.get(board_of(code), 10.0)
+
+
+def is_limit_close(code, s, j):
+    """j 日收盘是否涨停（按板块涨幅上限判定；容差 0.005 元）"""
+    if j <= 0:
+        return False
+    lp = round(s.kl[j - 1]["close"] * (1 + cap_pct(code) / 100.0), 2)
+    return s.kl[j]["close"] >= lp - 0.005
+
+
+def backtest(stop=0.05, half=True, remain_offset=1, capital=10000.0,
+             hold_limit=True, gap_fill=False):
     dates, didx, n2c, hn, hnb, htxt, lq = load_all()
     cand = candidates(n2c, hn, hnb, htxt, lq)
     cap = capital
@@ -100,12 +125,37 @@ def backtest(stop=0.05, half=True, remain_offset=1, capital=10000.0):
         i = s.pos[d]
         cost = s.kl[i]["open"]
         j = i + 1
-        if s.kl[j]["low"] <= cost * (1 - stop):
-            cap *= (1 - stop)
+        so = cost * (1 - stop)
+        fill = (lambda bar: min(so, bar["open"])) if gap_fill else (lambda bar: so)
+        if s.kl[j]["low"] <= so:
+            mult = fill(s.kl[j]) / cost
+            cap *= mult
             hold = didx[s.dates[j]]
             trades.append({"date": d, "code": c, "name": pick["name"], "gap": pick["gap"],
-                           "ret": round(-stop * 100, 2), "capital": round(cap),
+                           "ret": round((mult - 1) * 100, 2), "capital": round(cap),
                            "exit": "D+1 止损(全仓)"})
+            continue
+        if hold_limit and is_limit_close(c, s, j):        # D+1 尾盘涨停 → 续持到断板
+            k = j
+            why = "数据末端"
+            while k + 1 < len(s.kl):
+                k += 1
+                if s.kl[k]["low"] <= so:
+                    mult = fill(s.kl[k]) / cost
+                    why = "持有期止损(持%d天)" % (k - i)
+                    break
+                if not is_limit_close(c, s, k):
+                    mult = s.kl[k]["close"] / cost
+                    why = "断板卖出(持%d天)" % (k - i)
+                    break
+            else:
+                k = len(s.kl) - 1
+                mult = s.kl[k]["close"] / cost
+            cap *= mult
+            hold = didx[s.dates[k]]
+            trades.append({"date": d, "code": c, "name": pick["name"], "gap": pick["gap"],
+                           "ret": round((mult - 1) * 100, 2), "capital": round(cap),
+                           "exit": why})
             continue
         if not half:
             mult = s.kl[j]["close"] / cost
@@ -114,8 +164,8 @@ def backtest(stop=0.05, half=True, remain_offset=1, capital=10000.0):
         else:
             legA = 0.5 * (s.kl[j]["close"] / cost)
             k = min(j + remain_offset, len(s.kl) - 1)
-            if s.kl[k]["low"] <= cost * (1 - stop):
-                legB = 0.5 * (1 - stop)
+            if s.kl[k]["low"] <= so:
+                legB = 0.5 * (fill(s.kl[k]) / cost)
                 exit_why = "半仓 D+1 + 半仓止损"
             else:
                 legB = 0.5 * (s.kl[k]["close"] / cost)
@@ -209,6 +259,8 @@ def quotes(codes):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backtest", action="store_true")
+    ap.add_argument("--no-hold-limit", action="store_true", help="不续涨停（旧规则：只持到 D+2）")
+    ap.add_argument("--gap-fill", action="store_true", help="止损成交价取 min(止损价, 当日开盘价)")
     ap.add_argument("--quotes", action="store_true")
     ap.add_argument("--date", default="")
     a = ap.parse_args()
@@ -230,11 +282,12 @@ def main():
         if lst:
             print("\n→ 按规则买：%s(%s)（竞价涨幅最高）" % (lst[0]["name"], lst[0]["code"]))
         return
-    r = backtest()
+    r = backtest(hold_limit=not a.no_hold_limit, gap_fill=a.gap_fill)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     json.dump(r, open(OUT, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    print("L3 策略回测（止损%.0f%%，半仓D+1 + 半仓D+%d）" % (r["params"]["stop"] * 100,
-                                                    r["params"]["remain_offset"] + 1))
+    print("L3 策略回测（止损%.0f%%，%s）" % (r["params"]["stop"] * 100,
+          "半仓D+1 + 半仓D+%d" % (r["params"]["remain_offset"] + 1) if a.no_hold_limit
+          else "D+1 涨停续持到断板，未涨停则半仓D+1+半仓D+%d" % (r["params"]["remain_offset"] + 1)))
     print("  成交 %d 笔｜期末 %.0f 元｜收益 %+.1f%%｜胜率 %.1f%%｜最大回撤 %.1f%%｜最好 %+.1f%%｜最差 %+.1f%%"
           % (r["n_trades"], r["final"], r["return_pct"], r["winrate"], r["max_drawdown"],
              r["best"], r["worst"]))
