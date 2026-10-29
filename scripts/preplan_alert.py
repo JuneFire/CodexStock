@@ -593,6 +593,12 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
         lines.append("　· %s(%s)" % (nm, c))
         hn_s = (hn_bull.get(c) or {}).get("snippet") or ""
         lq_s = (lq_bear.get(c) or {}).get("snippet") or ""
+        if not lq_s and fk_bear:
+            lq_s = (fk_bear.get(c) or {}).get("snippet") or ""
+            if lq_s:
+                lq_s = "（空头风标名单）" + lq_s
+        if not lq_s:
+            lq_s = "（来去未给单句原文，命中「空头风标」名单）"
         lines.append("　　　红牛：%s" % _flat(hn_s, 46))
         lines.append("　　　来去：%s" % _flat(lq_s, 40))
     lines.append("")
