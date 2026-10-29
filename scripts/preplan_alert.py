@@ -982,12 +982,15 @@ def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12, new_codes=None
             marks.append("🆕")
         one, seal, amt, ratio, okk = one_word_info(x)
         if one:
+            seal_s = _yi(seal)             # 封单额（亿）
             if okk is False:
-                marks.append("🔒一字·封死(竞价比%s)" % ratio)
+                marks.append("🔒一字·封死 封单%s｜竞价比%s" % (seal_s, ratio))
             elif okk is True:
-                marks.append("🔒一字·可挂到(竞价比%s)" % ratio)
+                marks.append("🔒一字·可挂到 封单%s｜竞价比%s" % (seal_s, ratio))
+            elif seal is None:
+                marks.append("🔒一字·无封单数据")
             else:
-                marks.append("🔒一字(%s)" % (ratio or "无封单数据"))
+                marks.append("🔒一字 封单%s｜竞价比%s" % (seal_s, ratio))
         if x.get("ai") == "bull":
             marks.append("✅多")
         elif x.get("ai") == "neutral":
