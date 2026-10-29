@@ -593,11 +593,17 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
         lines.append("　· %s(%s)" % (nm, c))
         hn_s = (hn_bull.get(c) or {}).get("snippet") or ""
         lq_s = (lq_bear.get(c) or {}).get("snippet") or ""
+        if not lq_s and fk_bear:
+            lq_s = (fk_bear.get(c) or {}).get("snippet") or ""
+            if lq_s:
+                lq_s = "（空头风标名单）" + lq_s
+        if not lq_s:
+            lq_s = "（来去未给单句原文，命中「空头风标」名单）"
         lines.append("　　　红牛：%s" % _flat(hn_s, 46))
         lines.append("　　　来去：%s" % _flat(lq_s, 40))
     lines.append("")
     lines.append("**执行（L3 定稿口径）**")
-    lines.append("　· 开盘买入；盘中跌破买入价 **-5%** 立即止损")
+    lines.append("　· 开盘买入；**D+1 起**盘中跌破买入价 **-5%** 止损（T+1，当日不能卖）")
     lines.append("　· D+1 收盘卖 **半仓**，剩余半仓 D+2 收盘卖")
     lines.append("　· 历史（满仓复利/未计费）：23 笔 +283.9%｜胜率 60.9%｜回撤 -10.1%")
     lines.append("　· 与 L1 合并（有 L3 就做 L3）：52 笔 +1016.1%｜胜率 69.2%｜回撤 -14.3%")
@@ -762,7 +768,8 @@ def ai_audit(items):
 TIER_MARK = {"bull": "✅多", "bear": "⛔空", "neutral": "·中性"}
 
 
-def send_l1_update(date, items, added, version, final=False, veto=None, neutral=None, views=None):
+def send_l1_update(date, items, added, version, final=False, veto=None, neutral=None, views=None,
+                   l3_items=None):
     """L1 推送。items: [{code,name,tier,ai,why,snip}]；veto: AI 判空的票（只展示，不进候选）"""
     head = ("**%s L1 红牛看多·定稿（%s）**" % (date, datetime.now().strftime("%H:%M"))
             if final else
@@ -797,6 +804,20 @@ def send_l1_update(date, items, added, version, final=False, veto=None, neutral=
         lines.append("**L1 怎么用**：%d 只候选 → 09:25 竞价后按涨幅最高选 **1 只**、满仓；"
                      "次日收盘卖（不做当日止损，T+1）。全部涨停开盘且封死则空仓。"
                      % len(items))
+        lines.append("")
+    if final and l3_items is None:
+        lines.append("🔴 **L3 超跌反核**：来去预案未到，**待定**（到位后单独推送）")
+        lines.append("")
+    elif final and l3_items:
+        lines.append("🔴 **L3 超跌反核**（红牛看多 × 来去看空）：%s" % "、".join(
+            "%s(%s)" % (x["name"], x["code"]) for x in l3_items))
+        lines.append("　· 执行：开盘买｜**D+1 起**盘中跌破买入价 **-5%** 止损（T+1，当日不能卖）"
+                     "｜D+1 收盘卖半仓、剩余 D+2 收盘卖")
+        lines.append("　· **有 L3 优先做 L3**（合并回测 52 笔 +1016.1% / 胜 69.2% / 回撤 -14.3%，"
+                     "好于只做 L1 的 +548.6% / 胜 62.5% / 回撤 -19.4%）")
+        lines.append("")
+    elif final:
+        lines.append("🔴 **L3 超跌反核**：今日**无**（红牛看多 ∩ 来去看空 = 空集）")
         lines.append("")
     for x in items:
         marks = []
@@ -1147,6 +1168,11 @@ def once(dry_run=False, date=None, send=True):
                       "tier": tier_tag(rec.get("snippet", "")), "ai": av,
                       "why": (audit.get(c) or ("", ""))[1], "snip": rec.get("snippet", "")})
     added = [x["code"] for x in items if x["code"] not in pushed]
+    l3_preview = None            # 来去预案已到 → 让 L1 定稿里直接带 L3 状态
+    if texts["lq"]:
+        _, _L3pre, _ = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear, lq_fk["bear"])
+        l3_preview = [{"code": c, "name": full_name(c, (hn_bull.get(c) or {}).get("name", c))}
+                      for c in sorted(_L3pre)]
     now_hm = datetime.now().strftime("%H:%M")
     last_ts = st_l1.get("l1_last_ts") or ""
     final_at = os.environ.get("L1_FINAL_AT", "09:00")
@@ -1158,7 +1184,7 @@ def once(dry_run=False, date=None, send=True):
         ver += 1
         if send_l1_update(today, items, added, ver, final=do_final,
                           veto=st_l1.get("veto") or [], neutral=st_l1.get("neutral") or [],
-                          views=extract_views(texts["hn"], keys)):
+                          views=extract_views(texts["hn"], keys), l3_items=l3_preview):
             st_l1.update({"l1_ver": ver, "l1_pushed": sorted(set(pushed) | set(x["code"] for x in items)),
                           "l1_last_ts": time.time(), "l1_count": len(items),
                           "l1_final": True if do_final else st_l1.get("l1_final", False)})
