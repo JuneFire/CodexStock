@@ -14,7 +14,7 @@
        L3 = 红牛看多 ∩ 来去看空(空头风标) ∩ 红牛原文含"反核/次弱/地板/跌停开/低吸/反包"
        L5 = 红牛看多 ∩ 来去【短线方面】看多（2026-10-27 已下线，见 reports/L5回测_20261027.md）
        L1 = 红牛看多（仅统计用）
-  4) 09:10 推 L1 定稿（竞价 09:15 前留 5 分钟决策）、09:26 推竞价排名；有 L3 时在两条里标 🔴L3
+  4) 09:00 推 L1 定稿、09:26 推竞价排名；有 L3 时在两条里标 🔴L3
 """
 import argparse
 import io
@@ -593,12 +593,6 @@ def build_message(date, hn_bull, hn_bear, lq_bull, lq_bear, fk_bear=None):
         lines.append("　· %s(%s)" % (nm, c))
         hn_s = (hn_bull.get(c) or {}).get("snippet") or ""
         lq_s = (lq_bear.get(c) or {}).get("snippet") or ""
-        if not lq_s and fk_bear:
-            lq_s = (fk_bear.get(c) or {}).get("snippet") or ""
-            if lq_s:
-                lq_s = "（空头风标名单）" + lq_s
-        if not lq_s:
-            lq_s = "（来去未给单句原文，命中「空头风标」名单）"
         lines.append("　　　红牛：%s" % _flat(hn_s, 46))
         lines.append("　　　来去：%s" % _flat(lq_s, 40))
     lines.append("")
@@ -768,8 +762,7 @@ def ai_audit(items):
 TIER_MARK = {"bull": "✅多", "bear": "⛔空", "neutral": "·中性"}
 
 
-def send_l1_update(date, items, added, version, final=False, veto=None, neutral=None, views=None,
-                   l3_items=None):
+def send_l1_update(date, items, added, version, final=False, veto=None, neutral=None, views=None):
     """L1 推送。items: [{code,name,tier,ai,why,snip}]；veto: AI 判空的票（只展示，不进候选）"""
     head = ("**%s L1 红牛看多·定稿（%s）**" % (date, datetime.now().strftime("%H:%M"))
             if final else
@@ -804,19 +797,6 @@ def send_l1_update(date, items, added, version, final=False, veto=None, neutral=
         lines.append("**L1 怎么用**：%d 只候选 → 09:25 竞价后按涨幅最高选 **1 只**、满仓；"
                      "次日收盘卖（不做当日止损，T+1）。全部涨停开盘且封死则空仓。"
                      % len(items))
-        lines.append("")
-    if final and l3_items is None:
-        lines.append("🔴 **L3 超跌反核**：来去预案未到，**待定**（到位后单独推送）")
-        lines.append("")
-    elif final and l3_items:
-        lines.append("🔴 **L3 超跌反核**（红牛看多 × 来去看空）：%s" % "、".join(
-            "%s(%s)" % (x["name"], x["code"]) for x in l3_items))
-        lines.append("　· 执行：开盘买｜跌破买入价 **-5%** 止损｜D+1 收盘卖半仓、剩余 D+2 收盘卖")
-        lines.append("　· **有 L3 优先做 L3**（合并回测 52 笔 +1016.1% / 胜 69.2% / 回撤 -14.3%，"
-                     "好于只做 L1 的 +548.6%/胜 62.5%/回撤 -19.4%）")
-        lines.append("")
-    elif final:
-        lines.append("🔴 **L3 超跌反核**：今日**无**（红牛看多 ∩ 来去看空 = 空集）")
         lines.append("")
     for x in items:
         marks = []
@@ -943,12 +923,14 @@ def _pct(v):
     return "—" if v is None else "%.2f%%" % v
 
 
-def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
+def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12, new_codes=None):
     """09:26 竞价排名（只给信息，不给买入指令）
 
     输出：排名 / 名称(代码) / 板块 / 竞价涨幅 / 竞价金额 / 竞价换手 / AI判定 / 档位
     sort_by: gap（默认）| amt | turn
+    new_codes: 09:00 定稿之后新增的票（红牛/来去竞价期间补话），行尾标 🆕
     """
+    new_codes = set(new_codes or ())
     seen = set()
     allx = []
     for x in list(l3_cands) + list(l1_cands):
@@ -980,6 +962,12 @@ def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
 
     lines = ["**%s 竞价排名（09:25%s）**" % (date, "｜按" + {"gap": "涨幅", "amt": "金额",
                                                        "turn": "换手"}[sort_by] + "排序"), ""]
+    if new_codes:
+        nn = [full_name(c, next((x.get("name") for x in allx if x["code"] == c), c))
+              for c in sorted(new_codes)]
+        lines.append("🔔 **竞价期间新增 %d 只**：%s" % (len(nn), "、".join(nn)))
+        lines.append("_（09:00 定稿之后红牛/来去才提到的票，已并入下方排名）_")
+        lines.append("")
     ty = {}
     for x in ok:
         ty[x.get("tier") or "无原文"] = ty.get(x.get("tier") or "无原文", 0) + 1
@@ -990,6 +978,8 @@ def send_auction(date, l3_cands, l1_cands, sort_by="gap", top=12):
         lines.append("")
     for i, x in enumerate(ok[:top], 1):
         marks = []
+        if x["code"] in new_codes:
+            marks.append("🆕")
         one, seal, amt, ratio, okk = one_word_info(x)
         if one:
             if okk is False:
@@ -1048,7 +1038,7 @@ def send_fallback(date, summary):
         lines.append("　可能原因：预案改成了新格式（非图片/非标准文本）、群消息被撤、或发送时间晚于 09:20")
         lines.append("　→ 请顺手看一眼两个群，我按需调整解析规则")
     else:
-        lines.append("两家预案已解析成功，但**今天没有 L3 信号**（L1 清单见 09:10 定稿）")
+        lines.append("两家预案已解析成功，但**今天没有 L3 信号**（L1 清单见 09:00 定稿）")
         lines.append("　红牛 多%s / 空%s；来去 多%s / 空%s（风标 空%s）"
                      % (hn.get("bull", 0), hn.get("bear", 0), lq.get("bull", 0), lq.get("bear", 0),
                         summary.get("fk_bear", 0)))
@@ -1156,22 +1146,16 @@ def once(dry_run=False, date=None, send=True):
     added = [x["code"] for x in items if x["code"] not in pushed]
     now_hm = datetime.now().strftime("%H:%M")
     last_ts = st_l1.get("l1_last_ts") or ""
-    final_at = os.environ.get("L1_FINAL_AT", "09:10")
+    final_at = os.environ.get("L1_FINAL_AT", "09:00")
     ver = int(st_l1.get("l1_ver") or 0)
     do_final = bool(items) and now_hm >= final_at and not st_l1.get("l1_final")
     incremental = os.environ.get("L1_INCREMENTAL", "0").strip() in ("1", "true", "yes")
     gap_ok = (not last_ts) or (time.time() - float(last_ts) > 90)
-    l3_preview = None
-    if texts["lq"]:
-        _lb, _lbe, _ln, _lfk = parse_plans(texts["lq"], (n2c, keys))
-        _a, _l3p, _l5 = compute_layers(hn_bull, hn_bear, _lb, _lbe, _lfk["bear"])
-        l3_preview = [{"code": c, "name": full_name(c, (hn_bull.get(c) or {}).get("name", c))}
-                      for c in sorted(_l3p)]
     if send and (do_final or (incremental and added)) and gap_ok:
         ver += 1
         if send_l1_update(today, items, added, ver, final=do_final,
                           veto=st_l1.get("veto") or [], neutral=st_l1.get("neutral") or [],
-                          views=extract_views(texts["hn"], keys), l3_items=l3_preview):
+                          views=extract_views(texts["hn"], keys)):
             st_l1.update({"l1_ver": ver, "l1_pushed": sorted(set(pushed) | set(x["code"] for x in items)),
                           "l1_last_ts": time.time(), "l1_count": len(items),
                           "l1_final": True if do_final else st_l1.get("l1_final", False)})
@@ -1258,6 +1242,66 @@ def once(dry_run=False, date=None, send=True):
     return md
 
 
+def refresh_auction_candidates(date):
+    """**09:25 竞价结束时**重新采集一次：红牛/来去在 09:00-09:25 常补话，
+    新提到的票必须并入竞价排名（否则定稿后就漏了）
+
+    返回 (L1_items, L3_items)；红牛读不到时返回 (None, None) 表示用旧状态
+    """
+    n2c, keys = load_names()
+    texts = {}
+    for tag, chat in (("hn", CHAT_HONGNIU), ("lq", CHAT_LAIQIU)):
+        texts[tag], _s = collect_side(chat, date, tag)
+    if not texts["hn"]:
+        log("竞价刷新：红牛仍未读到，沿用定稿状态")
+        return None, None
+    hn_bull, hn_bear, _n, _fk = parse_plans(texts["hn"], (n2c, keys))
+    if texts["lq"]:
+        lq_bull, lq_bear, _ln, lq_fk = parse_plans(texts["lq"], (n2c, keys))
+    else:
+        lq_bull, lq_bear, lq_fk = {}, {}, {"bull": {}, "bear": {}}
+    rule_bull = set(hn_bull) - set(hn_bear)
+    audit = ai_audit([(c, (hn_bull.get(c) or {}).get("name", c),
+                       (hn_bull.get(c) or {}).get("snippet", "")) for c in sorted(rule_bull)])
+    L1 = []
+    for c in sorted(rule_bull):
+        if (audit.get(c) or ("", ""))[0] == "bear":
+            continue
+        rec = hn_bull.get(c) or {}
+        sn = rec.get("snippet") or ""
+        L1.append({"code": c, "name": full_name(c, rec.get("name") or c), "gap": None,
+                   "ai": (audit.get(c) or ("", ""))[0], "tier": tier_tag(sn), "hn": sn[:50]})
+    L3 = []
+    _a, l3p, _l5 = compute_layers(hn_bull, hn_bear, lq_bull, lq_bear, lq_fk["bear"])
+    for c in sorted(l3p):
+        rec = hn_bull.get(c) or {}
+        L3.append({"code": c, "name": full_name(c, rec.get("name") or c), "gap": None,
+                   "hn": (rec.get("snippet") or "")[:50]})
+    log("竞价刷新：红牛预案段 %d / 来去 %d → 词表多 %d → L1 %d 只 / L3 %d 只"
+        % (len(texts["hn"]), len(texts["lq"]), len(rule_bull), len(L1), len(L3)))
+    return L1, L3
+
+
+def merge_auction(date, L1_new, L3_new):
+    """把竞价刷新结果与 09:00 定稿状态合并，返回 (L3, L1, new_codes)"""
+    st = last_run_summary()
+    old_l1 = {x["code"]: x for x in (st.get("L1") or [])}
+    old_l3 = {x["code"]: x for x in (st.get("L3") or [])}
+    if L1_new is None and L3_new is None:
+        return list(old_l3.values()), list(old_l1.values()), set()
+    m1 = dict(old_l1)
+    for x in (L1_new or []):
+        m1[x["code"]] = dict(m1.get(x["code"], {}), **x)
+    m3 = dict(old_l3)
+    for x in (L3_new or []):
+        m3[x["code"]] = dict(m3.get(x["code"], {}), **x)
+    new = (set(m1) - set(old_l1)) | (set(m3) - set(old_l3))
+    if new:
+        log("竞价期间新增 %d 只：%s" % (len(new), "、".join(
+            full_name(c, c) for c in sorted(new))))
+    return list(m3.values()), list(m1.values()), new
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
@@ -1268,7 +1312,7 @@ def main():
     ap.add_argument("--no-send", action="store_true")
     ap.add_argument("--interval", type=int, default=300, help="平时轮询间隔秒（09:20 后自动 30s）")
     ap.add_argument("--until", default="09:30")
-    ap.add_argument("--l1-final", default="09:10", help="L1 定稿推送时间（默认 09:10，09:15 竞价开始前）")
+    ap.add_argument("--l1-final", default="09:00", help="L1 定稿推送时间（默认 09:00）")
     ap.add_argument("--l1-incremental", action="store_true", help="预案到一条推一条（默认只在定稿时推一次）")
     ap.add_argument("--preflight", action="store_true", help="07:00 自检（飞书/AI/行情）")
     ap.add_argument("--auction-now", action="store_true", help="立即发一次竞价排名（09:26 兜底）")
@@ -1290,16 +1334,24 @@ def main():
     if a.auction_now:
         st = last_run_summary()
         today = datetime.now().strftime("%Y-%m-%d")
-        if st.get("date") != today or st.get("auction_sent"):
-            log("竞价兜底：今日无候选或已推送，跳过")
+        if st.get("date") != today:
+            log("竞价兜底：今日无候选，跳过")
             return
-        if not st.get("L1") and not st.get("L3"):
+        # 竞价结束前再采一次：把 09:00 后红牛/来去补话的票并进来
+        L1n, L3n = refresh_auction_candidates(today)
+        l3c, l1c, newc = merge_auction(today, L1n, L3n)
+        if not l3c and not l1c:
             log("竞价兜底：无候选，跳过")
             return
-        if send_auction(today, list(st.get("L3") or []), list(st.get("L1") or []), sort_by=a.sort):
-            st["auction_sent"] = True
+        if st.get("auction_sent") and not newc:
+            log("竞价兜底：已推送且无新增，跳过")
+            return
+        if send_auction(today, l3c, l1c, sort_by=a.sort, new_codes=newc):
+            st = last_run_summary()
+            st.update({"L3": l3c, "L1": l1c, "auction_sent": True,
+                       "auction_new": sorted(newc)})
             json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
-            log("竞价兜底推送成功")
+            log("竞价兜底推送成功（新增 %d 只）" % len(newc))
         return
     if a.loop:
         os.environ.setdefault("L1_FINAL_AT", a.l1_final)
@@ -1317,11 +1369,15 @@ def main():
                 st = last_run_summary()
                 if (not auction_done and st.get("date") == datetime.now().strftime("%Y-%m-%d")
                         and (st.get("L3") or st.get("L1")) and datetime.now().strftime("%H:%M") >= "09:26"):
-                    log("竞价定档推送（L3 %d 只 / L1 %d 只）" % (len(st.get("L3") or []), len(st.get("L1") or [])))
-                    if send_auction(st["date"], list(st.get("L3") or []), list(st.get("L1") or []),
-                                    sort_by=SORT_BY):
+                    # 竞价结束：重采一次，把定稿后补话的票并进来
+                    _L1n, _L3n = refresh_auction_candidates(st["date"])
+                    _l3c, _l1c, _newc = merge_auction(st["date"], _L1n, _L3n)
+                    log("竞价定档推送（L3 %d 只 / L1 %d 只 / 新增 %d 只）"
+                        % (len(_l3c), len(_l1c), len(_newc)))
+                    if send_auction(st["date"], _l3c, _l1c, sort_by=SORT_BY, new_codes=_newc):
                         auction_done = True
-                        st["auction_sent"] = True
+                        st.update({"L3": _l3c, "L1": _l1c, "auction_sent": True,
+                                   "auction_new": sorted(_newc)})
                         json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
             except Exception as e:
                 log("ERR %s" % str(e)[:200])
