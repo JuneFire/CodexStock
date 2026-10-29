@@ -410,6 +410,31 @@ def tier_tag(snippet):
     return "弱"
 
 
+VIEW_HINT = ("情绪", "大盘", "指数", "题材", "板块", "方向", "梯队", "空间", "接力",
+             "低吸", "仓位", "节奏", "周期", "赚钱", "分化", "轮动", "量能")
+
+
+def extract_views(texts, keys, limit=3):
+    """从红牛预案里抽「非个股」的通用观点句（题材/情绪/节奏），原文摘录，不改判定"""
+    out = []
+    for item in texts:
+        t = item if isinstance(item, str) else (item[1] if len(item) > 1 else "")
+        for ln in re.split("[。；" + chr(10) + "]", t or ""):
+            seg = ln.strip(" 　·-—*")
+            if not (8 <= len(seg) <= 70):
+                continue
+            if any(k in seg for k in keys):        # 含个股名 → 属于个股句，不收
+                continue
+            if not any(w in seg for w in VIEW_HINT):
+                continue
+            if seg in out:
+                continue
+            out.append(seg)
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def full_name(code, fallback=""):
     """代码 → 全名（避免推送里出现「冰山」这种简称）"""
     if not C2N:
@@ -733,7 +758,7 @@ def ai_audit(items):
 TIER_MARK = {"bull": "✅多", "bear": "⛔空", "neutral": "·中性"}
 
 
-def send_l1_update(date, items, added, version, final=False, veto=None, neutral=None):
+def send_l1_update(date, items, added, version, final=False, veto=None, neutral=None, views=None):
     """L1 推送。items: [{code,name,tier,ai,why,snip}]；veto: AI 判空的票（只展示，不进候选）"""
     head = ("**%s L1 红牛看多·定稿（%s）**" % (date, datetime.now().strftime("%H:%M"))
             if final else
@@ -758,6 +783,16 @@ def send_l1_update(date, items, added, version, final=False, veto=None, neutral=
         lines.append("_档位=红牛措辞强度：强=明确买点｜中=较明确｜弱=仅提及或条件句｜否决=看空。"
                      "**实测与次日收益无单调关系**（弱档 31 笔 +4.08%/胜 67.7%；中档 6 笔 -1.95%/胜 33.3%），"
                      "只作措辞参考，不要据此加减仓。_")
+        lines.append("")
+    if views:
+        lines.append("**红牛观点**（原文摘录，非个股）")
+        for v in views:
+            lines.append("　　· %s" % v)
+        lines.append("")
+    if final and items:
+        lines.append("**L1 怎么用**：%d 只候选 → 09:25 竞价后按涨幅最高选 **1 只**、满仓；"
+                     "次日收盘卖（不做当日止损，T+1）。全部涨停开盘且封死则空仓。"
+                     % len(items))
         lines.append("")
     for x in items:
         marks = []
@@ -1105,7 +1140,8 @@ def once(dry_run=False, date=None, send=True):
     if send and (do_final or (incremental and added)) and gap_ok:
         ver += 1
         if send_l1_update(today, items, added, ver, final=do_final,
-                          veto=st_l1.get("veto") or [], neutral=st_l1.get("neutral") or []):
+                          veto=st_l1.get("veto") or [], neutral=st_l1.get("neutral") or [],
+                          views=extract_views(texts["hn"], keys)):
             st_l1.update({"l1_ver": ver, "l1_pushed": sorted(set(pushed) | set(x["code"] for x in items)),
                           "l1_last_ts": time.time(), "l1_count": len(items),
                           "l1_final": True if do_final else st_l1.get("l1_final", False)})
