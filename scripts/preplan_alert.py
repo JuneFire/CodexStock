@@ -762,7 +762,8 @@ def ai_audit(items):
 TIER_MARK = {"bull": "✅多", "bear": "⛔空", "neutral": "·中性"}
 
 
-def send_l1_update(date, items, added, version, final=False, veto=None, neutral=None, views=None):
+def send_l1_update(date, items, added, version, final=False, veto=None, neutral=None, views=None,
+                   l3_items=None):
     """L1 推送。items: [{code,name,tier,ai,why,snip}]；veto: AI 判空的票（只展示，不进候选）"""
     head = ("**%s L1 红牛看多·定稿（%s）**" % (date, datetime.now().strftime("%H:%M"))
             if final else
@@ -797,6 +798,19 @@ def send_l1_update(date, items, added, version, final=False, veto=None, neutral=
         lines.append("**L1 怎么用**：%d 只候选 → 09:25 竞价后按涨幅最高选 **1 只**、满仓；"
                      "次日收盘卖（不做当日止损，T+1）。全部涨停开盘且封死则空仓。"
                      % len(items))
+        lines.append("")
+    if final and l3_items is None:
+        lines.append("🔴 **L3 超跌反核**：来去预案未到，**待定**（到位后单独推送）")
+        lines.append("")
+    elif final and l3_items:
+        lines.append("🔴 **L3 超跌反核**（红牛看多 × 来去看空）：%s" % "、".join(
+            "%s(%s)" % (x["name"], x["code"]) for x in l3_items))
+        lines.append("　· 执行：开盘买｜跌破买入价 **-5%** 止损｜D+1 收盘卖半仓、剩余 D+2 收盘卖")
+        lines.append("　· **有 L3 优先做 L3**（合并回测 52 笔 +1016.1% / 胜 69.2% / 回撤 -14.3%，"
+                     "好于只做 L1 的 +548.6%/胜 62.5%/回撤 -19.4%）")
+        lines.append("")
+    elif final:
+        lines.append("🔴 **L3 超跌反核**：今日**无**（红牛看多 ∩ 来去看空 = 空集）")
         lines.append("")
     for x in items:
         marks = []
@@ -1141,11 +1155,17 @@ def once(dry_run=False, date=None, send=True):
     do_final = bool(items) and now_hm >= final_at and not st_l1.get("l1_final")
     incremental = os.environ.get("L1_INCREMENTAL", "0").strip() in ("1", "true", "yes")
     gap_ok = (not last_ts) or (time.time() - float(last_ts) > 90)
+    l3_preview = None
+    if texts["lq"]:
+        _lb, _lbe, _ln, _lfk = parse_plans(texts["lq"], (n2c, keys))
+        _a, _l3p, _l5 = compute_layers(hn_bull, hn_bear, _lb, _lbe, _lfk["bear"])
+        l3_preview = [{"code": c, "name": full_name(c, (hn_bull.get(c) or {}).get("name", c))}
+                      for c in sorted(_l3p)]
     if send and (do_final or (incremental and added)) and gap_ok:
         ver += 1
         if send_l1_update(today, items, added, ver, final=do_final,
                           veto=st_l1.get("veto") or [], neutral=st_l1.get("neutral") or [],
-                          views=extract_views(texts["hn"], keys)):
+                          views=extract_views(texts["hn"], keys), l3_items=l3_preview):
             st_l1.update({"l1_ver": ver, "l1_pushed": sorted(set(pushed) | set(x["code"] for x in items)),
                           "l1_last_ts": time.time(), "l1_count": len(items),
                           "l1_final": True if do_final else st_l1.get("l1_final", False)})
