@@ -410,24 +410,28 @@ def tier_tag(snippet):
     return "弱"
 
 
-VIEW_HINT = ("情绪", "大盘", "指数", "题材", "板块", "方向", "梯队", "空间", "接力",
-             "低吸", "仓位", "节奏", "周期", "赚钱", "分化", "轮动", "量能")
+VIEW_HINT = ("分歧", "回流", "先手", "兑现", "强度", "冰点", "高度", "切换", "接力",
+             "连板", "弱转强", "上板", "买点", "情绪", "题材", "板块", "梯队", "低吸",
+             "仓位", "节奏", "周期", "赚钱", "分化", "轮动", "空间", "大盘")
 
 
-def extract_views(texts, keys, limit=3):
-    """从红牛预案里抽「非个股」的通用观点句（题材/情绪/节奏），原文摘录，不改判定"""
+def extract_views(texts, keys, limit=5, maxlen=46):
+    """从红牛预案里抽「判断句」（题材/情绪/节奏/买点），原文摘录，不改判定
+
+    做法：按句号+逗号切 clause，丢掉含个股名的（那属于个股句），保留含观点词的短句。
+    """
     out = []
     for item in texts:
         t = item if isinstance(item, str) else (item[1] if len(item) > 1 else "")
-        for ln in re.split("[。；" + chr(10) + "]", t or ""):
-            seg = ln.strip(" 　·-—*")
-            if not (8 <= len(seg) <= 70):
+        for ln in re.split("[。；，,、（）()" + chr(10) + "]", t or ""):
+            seg = ln.strip(" 　·-—*:：")
+            if not (6 <= len(seg) <= maxlen):
                 continue
-            if any(k in seg for k in keys):        # 含个股名 → 属于个股句，不收
+            if any(k in seg for k in keys):        # 含个股名 → 个股句，不收
                 continue
             if not any(w in seg for w in VIEW_HINT):
                 continue
-            if seg in out:
+            if seg in out or any(seg in o or o in seg for o in out):
                 continue
             out.append(seg)
             if len(out) >= limit:
