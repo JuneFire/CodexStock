@@ -225,7 +225,7 @@ def score_candidate(features, stage, rules, sector_zt_count=0, sector_form=None,
             sc += w.get("ladderWarn", 0); warns.append("阶梯%s(%s)" % (grade, ladder.get("action") or ""))
         elif grade in ("超标", "剔除"):
             sc += w.get("ladderExclude", 0); warns.append("阶梯%s：%s" % (grade, ladder.get("action") or ""))
-    return max(0, min(100, sc)), hits, warns
+    return max(0, sc), hits, warns
 
 
 def judge_resonance(hits, stage, sector_zt_count, rules):
@@ -394,8 +394,8 @@ def judge_sector(idx, rules=None):
 TURNOVER_LADDER = (3, 6, 9, 13, 18, 23, 28, 33, 43, 55)
 
 LADDER_RULES = {
-    # 首板：3% 最优，6% 中性，9% 次优(偏弱)，>9% 超标通常排除
-    "board1": {"best": 3.5, "mid": 6.5, "weak": 9.0},
+    # 首板：3% 最优，6% 中性，9% 次优，>10% 排除（手册写 9%，实盘放宽到 10%）
+    "board1": {"best": 3.5, "mid": 6.5, "weak": 9.0, "exclude": 10.0},
     # 二板：9% 最优，13% 次优，18% 警戒，>18% 高风险（>20% 尤甚）
     "board2": {"best": 9.5, "good": 13.5, "warn": 18.0, "danger": 20.0},
     # 三板未缩量：18/23/28 健康（越小越好），>28% 剔除
@@ -454,8 +454,10 @@ def judge_ladder(board, turnover_seq, vols=None, rules=None):
             grade, action, tone = "中性", "需二板量能配合确认", "warn"
         elif latest <= b1["weak"]:
             grade, action, tone = "次优", "偏弱·谨慎观察", "warn"
+        elif latest <= b1["exclude"]:
+            grade, action, tone = "次优", "临界（9~10%）·可做但仓位降至三成", "warn"
         else:
-            grade, action, tone, exclude = "超标", "通常排除，不列入选项", "down", True
+            grade, action, tone, exclude = "超标", "超过10%·排除，不列入选项", "down", True
     elif board == 2:
         b2 = r["board2"]
         if latest <= b2["best"]:

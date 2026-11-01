@@ -878,6 +878,7 @@ def _build_snapshot(auto=False):
     print("[fetch] 昨日竞价量匹配 %d/%d" % (vr_matched, len(snapshot)), flush=True)
 
     stocks = [compute_metrics(s, yesterday_map.get(s["code"])) for s in snapshot]
+    _norm_auction_scores(stocks)
     # 标注"昨N连板"：读最近一个交易日已落盘的涨停池，命中则补 prevLb（0=未涨停）
     prev_lb = load_prev_lb_map()
     for s in stocks:
@@ -3796,13 +3797,14 @@ def scan_tactics(date_str):
         stage, stage_desc = tactics_engine.judge_turnover_stage(feats.get("turnoverSeq") or [], rules)
         score, hits, warns = tactics_engine.score_candidate(feats, stage, rules, sector_zt_count=s_zt,
                                                             sector_form=sector_form, ladder=ladder)
+        raw_score = score
         reso = tactics_engine.judge_resonance(hits, stage, s_zt, rules)
         four = (strategy or {}).get("fourGate") or {}
         out.append({
             "code": code, "name": r.get("name") or "", "industry": r.get("industry") or "",
             "lb": r.get("lb"), "sealAmount": r.get("sealAmount"), "sectorZt": s_zt,
             "sectorName": sec_name, "sectorForm": sector_form,
-            "stage": stage, "stageDesc": stage_desc, "score": score,
+            "stage": stage, "stageDesc": stage_desc, "score": score, "rawScore": raw_score,
             "hits": hits, "warns": warns, "resonance": reso,
             "latestTurnover": feats.get("latestTurnover"),
             "turnoverSeq": feats.get("turnoverSeq"),
@@ -3823,6 +3825,10 @@ def scan_tactics(date_str):
             "counterTrend": ((strategy or {}).get("counterTrend") or {}).get("verdict"),
             "strategy": strategy,
         })
+    # 得分改池内横截面分位：原来简单加和封顶 100，多头/倍量全中就全部 100 无区分度
+    for c, pct in zip(out, _cs_percentiles([c.get("rawScore") or 0 for c in out])):
+        c["score"] = pct
+
     # 排序：手册四关结论优先（可买 < 观察 < 回避），同档再比得分
     _rank = {"可买": 0, "观察": 1, "回避": 2}
     out.sort(key=lambda x: (_rank.get(x.get("verdict"), 3), -(x.get("score") or 0)))
@@ -4750,6 +4756,46 @@ def build_review(date_str, refresh=False):
         "manual": manual,
         "cached": cached,
     }
+
+
+def _cs_percentiles(values):
+    """横截面分位（0-100，同值取均位）——替代固定分母归一化，避免全班撞 cap。"""
+    n = len(values)
+    if n == 0:
+        return []
+    if n == 1:
+        return [100.0]
+    keyed = [(v if v is not None else float("-inf")) for v in values]
+    order = sorted(range(n), key=lambda i: keyed[i])
+    out = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and keyed[order[j + 1]] == keyed[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0
+        for k in range(i, j + 1):
+            out[order[k]] = round(avg / (n - 1) * 100.0, 1)
+        i = j + 1
+    return out
+
+
+def _norm_auction_scores(stocks):
+    """竞价榜得分改为池内横截面分位。
+
+    原 norm(value, cap) 用固定分母，行情火爆时全班撞 cap → 大面积 100 分、
+    区分度归零；分位只表达「在本池内的相对强弱」。原分数保留在 rawScore。
+    """
+    if not stocks:
+        return stocks
+    factors = (("amountStrength", 0.30), ("ratioToYesterday", 0.30),
+               ("auctionTurnover", 0.20), ("changePct", 0.12), ("volumeRatio", 0.08))
+    cols = {k: _cs_percentiles([to_float(s.get(k)) for s in stocks]) for k, _ in factors}
+    for i, s in enumerate(stocks):
+        s["rawScore"] = s.get("score")
+        s["score"] = round(sum(w * cols[k][i] for k, w in factors), 1)
+        s["scoreBasis"] = "cs-percentile"
+    return stocks
 
 
 class Handler(SimpleHTTPRequestHandler):
