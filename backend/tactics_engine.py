@@ -36,11 +36,16 @@ DEFAULT_RULES = {
         "sectorResonance": 15,   # 板块共振（同行业≥2只涨停）
         "sectorForm": 15,        # 板块形态好（低位站上60线+5/10/20多头向上）
         "volDouble": 15,         # 首板/二板倍量
+        "ladderBest": 12,        # 手册换手率阶梯：最优档加分
+        "ladderGood": 6,         # 次优档
+        "ladderWarn": -8,        # 警戒档
+        "ladderExclude": -22,    # 剔除档（>9%首板 / >28%三板 / 四板放量覆盖）
     },
     "sectorResonanceMin": 2,   # 同行业涨停家数达到此值算板块共振
     "messageZtMin": 3,         # 消息共振：同行业涨停 ≥ 此值（板块热度高=有题材催化）
     "resonanceTechMin": 2,     # 个股共振：技术面核心维度至少命中几项
     "onlyResonant": True,      # 只输出三方共振标的（凑不齐时回落按分排序）
+    "candLbMax": 3,           # 候选连板数上限（手册二板战法主做1→2板，三板缩量优先也保留）
     "topN": 20,
 }
 
@@ -138,6 +143,9 @@ def analyze_kline(rows, rules):
         "prevVolRatio": round(prev_vol_ratio, 2) if prev_vol_ratio is not None else None,
         "turnoverSeq": turnover_seq, "latestTurnover": latest_turnover,
         "floatCapYi": None,  # 由调用方从全市场快照 ltsz 填入（日K volume 单位不稳定，不反推）
+        # 以下为长序列，供换手率阶梯（压力位/庄股/爆量覆盖前量）使用，不入库
+        "turnsHistory": turns[-130:], "closesHistory": closes[-130:],
+        "volsHistory": vols[-130:], "open": rows[-1].get("open"),
     }
 
 
@@ -161,11 +169,12 @@ def judge_turnover_stage(turnover_seq, rules):
     return "常规", ""
 
 
-def score_candidate(features, stage, rules, sector_zt_count=0, sector_form=None):
+def score_candidate(features, stage, rules, sector_zt_count=0, sector_form=None, ladder=None):
     """技术面特征 + 阶段 + 板块涨停家数 + 板块形态 → (score, hits[], warns[])。
 
     三方共振：消息面(板块热度近似) + 板块(同行业涨停家数) + 个股(技术面/换手率)。
     sector_form: judge_sector 的结果；good=True 时加板块形态分。
+    ladder: judge_ladder 的结果；按手册换手率阶梯给档位加减分。
     """
     w = rules["weights"]
     sc = 0
@@ -205,6 +214,17 @@ def score_candidate(features, stage, rules, sector_zt_count=0, sector_form=None)
         sc += w["stageHealthy"]; hits.append("缩量加速")
     elif stage == "放量兑现":
         sc += w["stageBurst"]; warns.append("放量兑现(顶部风险)")
+    # 手册换手率阶梯：档位优先于「阶段」的粗略判断
+    if ladder:
+        grade = ladder.get("grade")
+        if grade == "最优":
+            sc += w.get("ladderBest", 0); hits.append("阶梯最优%d档" % (ladder.get("ladder") or 0))
+        elif grade in ("次优", "健康"):
+            sc += w.get("ladderGood", 0); hits.append("阶梯%s%d档" % (grade, ladder.get("ladder") or 0))
+        elif grade in ("警戒", "高风险"):
+            sc += w.get("ladderWarn", 0); warns.append("阶梯%s(%s)" % (grade, ladder.get("action") or ""))
+        elif grade in ("超标", "剔除"):
+            sc += w.get("ladderExclude", 0); warns.append("阶梯%s：%s" % (grade, ladder.get("action") or ""))
     return max(0, min(100, sc)), hits, warns
 
 
@@ -364,3 +384,368 @@ def judge_sector(idx, rules=None):
     good = above and near and bull and up and low
     return {"good": good, "hits": hits, "dist": round(dist, 4),
             "pos": round(pos, 3) if pos is not None else None, "name": idx.get("name")}
+
+
+# ============================================================
+# 《二板战法手册》规则层：换手率阶梯 → 六维串联 → 四关 → 仓位
+# 手册章节对照：C.1 阶梯表 / 1.7 五层漏斗 / 4.4 六维 / 2.3 三板缩量 / 3.8 四关
+# ============================================================
+
+TURNOVER_LADDER = (3, 6, 9, 13, 18, 23, 28, 33, 43, 55)
+
+LADDER_RULES = {
+    # 首板：3% 最优，6% 中性，9% 次优(偏弱)，>9% 超标通常排除
+    "board1": {"best": 3.5, "mid": 6.5, "weak": 9.0},
+    # 二板：9% 最优，13% 次优，18% 警戒，>18% 高风险（>20% 尤甚）
+    "board2": {"best": 9.5, "good": 13.5, "warn": 18.0, "danger": 20.0},
+    # 三板未缩量：18/23/28 健康（越小越好），>28% 剔除
+    "board3": {"ok": 18.0, "good": 23.0, "max": 28.0},
+    # 四板起：温和放量可不覆盖前量（13-18 档）
+    "board4": {"ok": 18.0},
+    "surgeMax": 20.0,       # 两三板放量 >20% = 主力仓位过猛
+    "lateBurst": 23.0,      # 末段爆量档起点（23/33/43/55）
+    "pressureMax": 10.0,    # 前高附近最高换手 < 约 10% = 上方无强套牢盘
+    "pressureTol": 0.5,     # 临界容差（手册原文是「约 10%」）
+    "zhuang": {"turnMin": 0.5, "turnMax": 8.0, "aboveMa5Ratio": 0.5,
+               "ampMax": 0.25, "lookback": 20},
+    "lianyang": {"noNew": 6, "cut": 7, "empty": 8, "clear": 9},
+    "counterTrend": {"ok": 1, "soso": 2, "stop": 3},
+    "sectorStaleDays": 5,   # 板块指数缓存落后超过此天数 → 逆势判定置为不可用
+}
+
+
+def nearest_ladder(pct):
+    """换手率 → 最近的阶梯档位（3·6·9·13·18·23·28·33·43·55）。"""
+    if pct is None:
+        return None
+    return min(TURNOVER_LADDER, key=lambda x: abs(x - pct))
+
+
+def judge_ladder(board, turnover_seq, vols=None, rules=None):
+    """按手册 C.1 换手率阶梯判定当前档位与动作。
+
+    board: 连板数（1=首板，2=二板，3=三板，4+=高板）
+    turnover_seq: 升序换手率(%)，末位=当日
+    vols: 升序成交量序列，用于四板「放量是否覆盖前量」
+    返回 {board,latest,prev,ladder,shrink,grade,action,tone,exclude,coverPrevVol,notes}
+    """
+    r = rules or LADDER_RULES
+    seq = [float(x) for x in (turnover_seq or []) if x is not None]
+    if not seq:
+        return None
+    board = max(1, int(board or 1))
+    latest = seq[-1]
+    prev = seq[-2] if len(seq) >= 2 else None
+    shrink = bool(prev and prev > 0 and latest < prev)
+    ladder = nearest_ladder(latest)
+    notes = []
+    cover = False
+    if vols and len(vols) > board:
+        window = [v for v in vols[-(board + 1):-1] if v]
+        if window:
+            cover = bool(vols[-1] >= max(window))
+    grade, action, tone, exclude = "常规", "", "flat", False
+
+    if board <= 1:
+        b1 = r["board1"]
+        if latest <= b1["best"]:
+            grade, action, tone = "最优", "首选·锁筹好抛压小", "up"
+        elif latest <= b1["mid"]:
+            grade, action, tone = "中性", "需二板量能配合确认", "warn"
+        elif latest <= b1["weak"]:
+            grade, action, tone = "次优", "偏弱·谨慎观察", "warn"
+        else:
+            grade, action, tone, exclude = "超标", "通常排除，不列入选项", "down", True
+    elif board == 2:
+        b2 = r["board2"]
+        if latest <= b2["best"]:
+            grade, action, tone = "最优", "可重仓（缩量更佳）", "up"
+            if shrink:
+                notes.append("二板缩量(6-9档最佳)")
+        elif latest <= b2["good"]:
+            grade, action, tone = "次优", "可参与·仓位略降", "warn"
+        elif latest <= b2["warn"]:
+            grade, action, tone = "警戒", "不新开仓·持有者准备离场", "down"
+        else:
+            grade, action, tone = "高风险", "慎之又慎·只做冲高即走", "down"
+            if latest >= b2["danger"]:
+                notes.append("换手超20%：新进主力接盘压力极大")
+    elif board == 3:
+        b3 = r["board3"]
+        if shrink:
+            grade, action, tone = "最优", "缩量优先·一致性与集中度最佳", "up"
+        elif latest <= b3["ok"]:
+            grade, action, tone = "健康", "18档健康，越小越好", "up"
+        elif latest <= b3["good"]:
+            grade, action, tone = "次优", "23档健康，越小越好", "warn"
+        elif latest <= b3["max"]:
+            grade, action, tone = "健康", "28档边缘，越小越好", "warn"
+        else:
+            grade, action, tone, exclude = "剔除", "超出上限·放弃跟踪", "down", True
+    else:
+        b4 = r["board4"]
+        if shrink:
+            grade, action, tone = "最优", "缩量加速·场外进不来", "up"
+        elif cover:
+            grade, action, tone, exclude = "剔除", "放量覆盖前量=溢价开始消失", "down", True
+        elif latest <= b4["ok"]:
+            grade, action, tone = "中性", "温和放量·未覆盖前量", "warn"
+        else:
+            grade, action, tone = "警戒", "放量过大·准备离场", "down"
+
+    if board >= 2 and latest >= r["lateBurst"] and not shrink:
+        notes.append("已进爆量档(23+/33/43/55)→离场区")
+    if 2 <= board <= 3 and latest > r["surgeMax"]:
+        notes.append("两三板放量超20%：主力仓位过猛，次日缩量加速可修复，再度放量则减仓")
+    return {"board": board, "latest": round(latest, 2),
+            "prev": round(prev, 2) if prev is not None else None,
+            "ladder": ladder, "shrink": shrink, "grade": grade, "action": action,
+            "tone": tone, "exclude": exclude, "coverPrevVol": cover, "notes": notes}
+
+
+def judge_pressure_level(turns, board, rules=None, closes=None):
+    """压力位判定（手册 4.6）：前高附近最高换手 < 约 10% = 上方无强套牢区。
+
+    turns/closes: 升序换手率(%)与收盘价，同一长度；board 用于剔除本波连板段。
+    取「前高日±10 日」区间内的最高换手作为套牢密度的代理指标。
+    """
+    r = rules or LADDER_RULES
+    hist = [float(t) for t in (turns or []) if t]
+    cut = max(1, int(board or 1))
+    if len(hist) <= cut:
+        return None
+    base = hist[:-cut][-120:]
+    cs = [float(c) for c in (closes or []) if c]
+    prev_max = None
+    how = "区间最高换手"
+    if len(cs) == len(hist):
+        seq_c = cs[:-cut][-120:]
+        if len(seq_c) == len(base) and seq_c:
+            i_hi = max(range(len(seq_c)), key=lambda i: seq_c[i])
+            seg = base[max(0, i_hi - 10): i_hi + 11]
+            if seg:
+                prev_max = max(seg)
+                how = "前高日±10日最高换手"
+    if prev_max is None:
+        prev_max = max(base)
+    ok = prev_max <= r["pressureMax"] + r.get("pressureTol", 0.0)
+    return {"prevMaxTurnover": round(prev_max, 2), "pass": ok, "basis": how,
+            "note": ("%s%.1f%%<%.0f%%，上方抛压有限"
+                     % (how, prev_max, r["pressureMax"])) if ok else
+                    ("%s%.1f%%，前高套牢盘密集" % (how, prev_max))}
+
+
+def judge_zhuanggu(turns, closes, board, rules=None):
+    """庄股特征（手册 1.7 第2层）：首板前换手温和，且「沿 5 日线上行」或「长期横盘/阴跌后启动」。
+
+    阶梯只看首板之前的那段（剔除本波连板段），否则连板自身会把形态抬高。
+    """
+    r = (rules or LADDER_RULES)["zhuang"]
+    cut = max(1, int(board or 1))
+    hist = [float(t) for t in (turns or []) if t]
+    cs_all = [float(c) for c in (closes or []) if c]
+    if len(hist) <= cut or len(cs_all) <= cut:
+        return None
+    pre_t = hist[:-cut][-r["lookback"]:]
+    pre_c = cs_all[:-cut][-(r["lookback"] + 5):]
+    if len(pre_t) < 5 or len(pre_c) < 6:
+        return None
+    mean_t = sum(pre_t) / len(pre_t)
+    # 沿 5 日线上行：首板前最近 10 日收盘在 MA5 上方的比例
+    above = 0
+    n = 0
+    for i in range(max(4, len(pre_c) - 10), len(pre_c)):
+        ma5 = sum(pre_c[i - 4:i + 1]) / 5
+        n += 1
+        if ma5 > 0 and pre_c[i] >= ma5:
+            above += 1
+    ratio = above / n if n else 0.0
+    amp = (max(pre_t) - min(pre_t)) / max(pre_t) if max(pre_t) > 0 else None
+    turn_ok = r["turnMin"] <= mean_t <= r["turnMax"]
+    trend_ok = ratio >= r["aboveMa5Ratio"]
+    flat_ok = amp is not None and amp <= r["ampMax"]
+    if turn_ok and trend_ok:
+        form = "沿5日线上行"
+    elif turn_ok and flat_ok:
+        form = "横盘/阴跌后启动"
+    else:
+        form = "未控盘"
+    return {"meanTurnover": round(mean_t, 2), "aboveMa5Ratio": round(ratio, 2),
+            "turnRange": round(amp * 100, 1) if amp is not None else None,
+            "pass": bool(turn_ok and (trend_ok or flat_ok)), "form": form,
+            "note": "首板前均换手%.1f%%/沿5日线%.0f%%/振幅%s → %s"
+                    % (mean_t, ratio * 100, ("%.0f%%" % (amp * 100)) if amp is not None else "—", form)}
+
+
+def judge_lianyang(closes, rules=None):
+    """连阳计数（手册 C.2）：收盘价连续走高天数 → 买入侧/持有侧动作与仓位上限。"""
+    r = (rules or LADDER_RULES)["lianyang"]
+    cs = [float(c) for c in (closes or []) if c]
+    if len(cs) < 2:
+        return None
+    cnt = 0
+    for i in range(len(cs) - 1, 0, -1):
+        if cs[i] > cs[i - 1]:
+            cnt += 1
+        else:
+            break
+    if cnt >= r["clear"]:
+        action, cap, tone = "清仓", "0", "down"
+    elif cnt >= r["empty"]:
+        action, cap, tone = "基本空仓（观察仓）", "≤20%", "down"
+    elif cnt >= r["cut"]:
+        action, cap, tone = "减仓", "≤50%", "warn"
+    elif cnt >= r["noNew"]:
+        action, cap, tone = "不新开仓（买入侧直接否决）", "满仓不动", "warn"
+    else:
+        action, cap, tone = "可持有·可介入", "—", "up"
+    return {"count": cnt, "action": action, "positionCap": cap, "tone": tone,
+            "noNew": cnt >= r["noNew"]}
+
+
+def judge_counter_trend(sector_closes, rules=None, stale_days=None):
+    """逆势纪律（手册 4.6）：板块连续下跌天数 → 可参与/勉强承接/必须走。"""
+    r = (rules or LADDER_RULES)
+    if stale_days is not None and stale_days > r["sectorStaleDays"]:
+        return {"downDays": None, "verdict": "不可用", "tone": "flat",
+                "note": "板块指数缓存落后%d天，逆势判定跳过" % stale_days}
+    cs = [float(c) for c in (sector_closes or []) if c]
+    if len(cs) < 2:
+        return None
+    days = 0
+    for i in range(len(cs) - 1, 0, -1):
+        if cs[i] < cs[i - 1]:
+            days += 1
+        else:
+            break
+    ct = r["counterTrend"]
+    if days >= ct["stop"]:
+        return {"downDays": days, "verdict": "必须走", "tone": "down",
+                "note": "板块%d连跌，逆势个股次日最低开跌停" % days}
+    if days >= ct["soso"]:
+        return {"downDays": days, "verdict": "勉强承接", "tone": "warn",
+                "note": "板块%d连跌，减仓只留底仓" % days}
+    if days >= ct["ok"]:
+        return {"downDays": days, "verdict": "可参与", "tone": "warn",
+                "note": "板块%d连跌，可持有但不再加仓" % days}
+    return {"downDays": days, "verdict": "板块正常", "tone": "up", "note": ""}
+
+
+def _six_dim(feats, board, ctx, rules, pressure, zhuang):
+    """六维串联否决（手册 4.4）：盘子/庄股/名字/贴合度/排雷/压力位。
+
+    可计算的三维给出 pass/fail；名字、贴合度、排雷需要公告与主营数据，
+    本仓库无可靠数据源 → 标 manual（人工复核），不伪造结论。
+    """
+    fc = feats.get("floatCapYi")
+    price = ctx.get("price") or feats.get("close")
+    cap_max = rules.get("floatCapHigh") or 150.0
+    items = []
+    if fc is None:
+        items.append({"key": "cap", "label": "盘子", "status": "unknown", "detail": "流通市值缺失"})
+    else:
+        ok = fc <= cap_max
+        detail = "流通盘%.0f亿" % fc + ("，股价%.2f元" % price if price else "")
+        items.append({"key": "cap", "label": "盘子", "status": "pass" if ok else "fail",
+                      "detail": detail + ("" if ok else "，盘子过大封不住")})
+    if zhuang is None:
+        items.append({"key": "zhuang", "label": "庄股", "status": "unknown", "detail": "历史数据不足"})
+    else:
+        items.append({"key": "zhuang", "label": "庄股",
+                      "status": "pass" if zhuang["pass"] else "fail", "detail": zhuang["note"]})
+    items.append({"key": "name", "label": "名字", "status": "manual",
+                  "detail": "辨识度（行业词/地名/记忆点）需人工判断"})
+    items.append({"key": "fit", "label": "贴合度", "status": "manual",
+                  "detail": "主营与概念是否真贴合，需人工核对公告"})
+    items.append({"key": "risk", "label": "排雷", "status": "manual",
+                  "detail": "减持/解禁/质押/商誉/业绩雷，需查公告"})
+    if pressure is None:
+        items.append({"key": "pressure", "label": "压力位", "status": "unknown", "detail": "数据不足"})
+    else:
+        items.append({"key": "pressure", "label": "压力位",
+                      "status": "pass" if pressure["pass"] else "fail", "detail": pressure["note"]})
+    return items
+
+
+def _four_gate(ladder, pressure, lianyang, counter, gate6, ctx, rules):
+    """四关串联（手册 3.8）：三关筛票 + 一关定仓。任一关否决即不介入。"""
+    fails = [g for g in gate6 if g["status"] == "fail"]
+    # 无数据（unknown）保守拦为「观察」；需人工核对的（manual）不拦，只提示
+    unknown = [g for g in gate6 if g["status"] == "unknown"]
+    manual = [g["label"] for g in gate6 if g["status"] == "manual"]
+    gates = []
+    # 第一关：概念持续性/传播力 —— 无概念图谱数据源，需人工（手册：否=终局放弃）
+    gates.append({"gate": 1, "name": "概念持续性/传播力", "status": "manual",
+                  "detail": "需人工判断：能否持续 + 能否传播（否=终局放弃）"})
+    # 第二关：板块时间节点 —— 用个股连阳近似（概念指数连阳≥6 视为高位）
+    if lianyang is None:
+        gates.append({"gate": 2, "name": "板块时间节点", "status": "unknown", "detail": "数据不足"})
+    else:
+        ok2 = lianyang["count"] < rules["lianyang"]["noNew"]
+        gates.append({"gate": 2, "name": "板块时间节点",
+                      "status": "pass" if ok2 else "fail",
+                      "detail": "个股%d连阳，%s" % (lianyang["count"], lianyang["action"])})
+    # 第三关：盘口贴合/压力位/风险 —— 连阳否决 + 压力位 + 六维否决项
+    g3_status, g3_detail = "pass", "连阳未到高位且压力位通过"
+    if lianyang is not None and lianyang["count"] >= rules["lianyang"]["noNew"]:
+        g3_status, g3_detail = "fail", "%d连阳高位，不介入" % lianyang["count"]
+    elif pressure is not None and not pressure["pass"]:
+        g3_status, g3_detail = "fail", pressure["note"]
+    elif fails:
+        g3_status, g3_detail = "fail", "六维否决：" + "、".join(g["label"] for g in fails)
+    gates.append({"gate": 3, "name": "盘口贴合/压力位/风险",
+                  "status": g3_status, "detail": g3_detail})
+    # 第四关：仓位（起爆点由调用方近似判定：站上MA60 + 倍量 + 低位）
+    is_ji = bool(ctx.get("jipoint"))
+    strong = (ctx.get("sectorZt") or 0) >= 3
+    if is_ji:
+        pos, pos_tone = "重仓", "up"
+    elif strong:
+        pos, pos_tone = "五成", "warn"
+    else:
+        pos, pos_tone = "三成", "warn"
+    gates.append({"gate": 4, "name": "仓位", "status": "pass",
+                  "detail": ("起爆点→重仓" if is_ji else
+                             ("非起爆点·概念强→五成" if strong else "非起爆点·概念一般→三成"))})
+    blocked = [g for g in gates if g["status"] == "fail"]
+    if blocked:
+        verdict, pos, pos_tone = "回避", "不参与", "down"
+    elif unknown:
+        verdict, pos, pos_tone = "观察", "待人工复核", "flat"
+    else:
+        verdict = "可买"
+    return {"gates": gates, "verdict": verdict, "position": pos, "positionTone": pos_tone,
+            "blocked": [g["gate"] for g in blocked],
+            "manualChecks": manual}
+
+
+def judge_strategy(feats, board, rules=None, ctx=None):
+    """手册规则流水线总入口：阶梯 → 压力位/庄股 → 连阳/逆势 → 六维 → 四关 → 仓位。
+
+    ctx 约定：floatCapYi / price / sectorZt / sectorCloses / sectorStaleDays /
+             aboveMa60 / breakMa60 / jipoint（是否处于起爆点近似）
+    """
+    if not feats:
+        return None
+    r = rules or LADDER_RULES
+    ctx = dict(ctx or {})
+    turns = feats.get("turnsHistory") or []
+    closes = feats.get("closesHistory") or []
+    vols = feats.get("volsHistory") or []
+    ladder = judge_ladder(board, feats.get("turnoverSeq") or [], vols, r)
+    pressure = judge_pressure_level(turns, board, r, closes)
+    zhuang = judge_zhuanggu(turns, closes, board, r)
+    lianyang = judge_lianyang(closes, r)
+    counter = judge_counter_trend(ctx.get("sectorCloses") or [], r,
+                                  ctx.get("sectorStaleDays"))
+    gate6 = _six_dim(feats, board, ctx, r, pressure, zhuang)
+    four = _four_gate(ladder, pressure, lianyang, counter, gate6, ctx, r)
+    if ladder and ladder["exclude"] and four["verdict"] != "回避":
+        four.update(verdict="回避", position="不参与", positionTone="down")
+    if counter and counter.get("verdict") == "必须走" and four["verdict"] != "回避":
+        four.update(verdict="回避", position="不参与", positionTone="down")
+    return {"ladder": ladder, "pressure": pressure, "zhuang": zhuang,
+            "lianyang": lianyang, "counterTrend": counter, "gate6": gate6,
+            "fourGate": four}
+
+

@@ -105,6 +105,9 @@
   function rowHtml(c, i, showReso) {
     const stageCls = STAGE_CLS[c.stage] || 'tag';
     const reso = c.resonance || {};
+    const st = c.strategy || {};
+    const lad = st.ladder || {};
+    const four = st.fourGate || {};
     let badge = '';
     if (showReso !== false && reso.resonant) {
       badge = '<span class="tag tag-up" title="消息+板块+个股三方共振">三方共振</span>';
@@ -113,6 +116,24 @@
     }
     const hits = (c.hits || []).map(h => `<span class="tag">${esc(h)}</span>`).join('');
     const warns = (c.warns || []).map(w => `<span class="tag tag-down">${esc(w)}</span>`).join('');
+    // 手册·换手率阶梯档位
+    const ladCls = lad.tone === 'up' ? 'tag-up' : (lad.tone === 'down' ? 'tag-down' : 'tag-warn');
+    const ladTxt = lad.grade
+      ? `<span class="tag ${ladCls}" title="${esc(lad.action || '')}">${esc(lad.grade)}${lad.ladder ? ' ' + lad.ladder + '档' : ''}</span>`
+      : '<span class="tag">—</span>';
+    const shrinkTag = lad.shrink
+      ? '<span class="tag tag-accent" title="当日换手低于前一日（手册：三板缩量优先）">缩量</span>' : '';
+    // 手册·四关结论 + 仓位
+    const vCls = four.verdict === '可买' ? 'tag-up' : (four.verdict === '回避' ? 'tag-down' : 'tag-warn');
+    const blocked = four.blocked || [];
+    const manual = four.manualChecks || [];
+    const vTip = blocked.length
+      ? '第' + blocked.join('、') + '关否决'
+      : (manual.length ? '需人工复核：' + manual.join('/') : '四关通过');
+    const verdictCell = four.verdict
+      ? `<span class="tag ${vCls}" title="${esc(vTip)}">${esc(four.verdict)}</span>
+         <span class="dim">${esc(four.position || '')}</span>`
+      : '<span class="tag">—</span>';
     return `
       <tr>
         <td class="num">${i + 1}</td>
@@ -121,6 +142,8 @@
         <td class="num">${c.lb || 0}板</td>
         <td class="num">${c.sectorZt || 0}只</td>
         <td class="num">${c.latestTurnover != null ? fmtNum(c.latestTurnover, 1) + '%' : '—'}</td>
+        <td class="hits-cell">${ladTxt}${shrinkTag}</td>
+        <td class="hits-cell">${verdictCell}</td>
         <td><span class="tag ${stageCls}">${esc(c.stage)}</span></td>
         <td class="num">${c.prevVolRatio != null ? fmtNum(c.prevVolRatio, 1) + 'x' : '—'}</td>
         <td class="num">${c.floatCapYi != null ? fmtNum(c.floatCapYi, 0) + '亿' : '—'}</td>
@@ -144,7 +167,7 @@
     els.tacticsBanner.innerHTML = `
       <span class="env-dot"></span>
       <span class="env-label"><b>市场环境：${esc(mkt.envLabel || mkt.envState || '—')}</b></span>
-      <span class="env-advice">扫描${d.scanned || 0}只首板/2板 · 三方共振${d.resonantN || 0}只 · 入选${(d.candidates || []).length}只 · ${esc((d.savedAt || '').slice(11, 16))}</span>`;
+      <span class="env-advice">扫描${d.scanned || 0}只首板~${d.candLbMax || 3}板 · 三方共振${d.resonantN || 0}只 · 入池${(d.candidates || []).length}只 · 可买${(d.verdictN || {}).可买 || 0}/观察${(d.verdictN || {}).观察 || 0}/回避${(d.verdictN || {}).回避 || 0} · ${esc((d.savedAt || '').slice(11, 16))}</span>`;
 
     const cands = d.candidates || [];
     els.tacticsMeta.textContent = (d.scanned || 0) + ' 只候选 · 三方共振 ' + (d.resonantN || 0) + ' 只 → 前 ' + cands.length;

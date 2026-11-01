@@ -56,6 +56,7 @@ LATEST_FILE = os.path.join(DATA_DIR, "latest.json")
 HISTORY_DIR = os.path.join(DATA_DIR, "history")
 PLAN_DIR = os.path.join(DATA_DIR, "plan")
 ZTPOOL_DIR = os.path.join(DATA_DIR, "ztpool")  # 每日涨停池连板明细（次日给竞价股标"昨N连板"）
+ZTPOOL_HIST_DIR = os.path.join(DATA_DIR, "market", "ztpool_hist")  # 涨停池原始存档（东财中文列，战法扫描降级用）
 SENTIMENT_DIR = os.path.join(DATA_DIR, "sentiment")  # 每日情绪摘要（判断情绪周期/环境）
 MARKET_DAILY_DIR = os.path.join(DATA_DIR, "market_daily")  # 每日收盘市场画像（赚钱环境用）
 MARKET_INDICES_FILE = os.path.join(DATA_DIR, "market_indices.json")  # 指数收盘序列累积（供 MA）
@@ -2756,15 +2757,49 @@ def load_prev_lb_map():
 
 
 def _ztpool_rows(date_str):
-    """读某日已落盘涨停池的 rows；无则返回 []。"""
+    """读某日已落盘涨停池的 rows；无则返回 []。
+
+    优先 data/ztpool/<date>.json（标准字段），缺失时回落 data/market/ztpool_hist/
+    （东财原始中文列，归一化成同一套字段），让历史日也能跑战法扫描。
+    """
     path = os.path.join(ZTPOOL_DIR, date_str + ".json")
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return (json.load(f).get("rows")) or []
+        except Exception:
+            return []
+    return _ztpool_rows_hist(date_str)
+
+
+def _ztpool_rows_hist(date_str):
+    """data/market/ztpool_hist/<date>.json（东财原始列）→ 标准涨停池 rows。"""
+    path = os.path.join(ZTPOOL_HIST_DIR, date_str + ".json")
     if not os.path.isfile(path):
         return []
     try:
         with open(path, encoding="utf-8") as f:
-            return (json.load(f).get("rows")) or []
+            rows = (json.load(f).get("rows")) or []
     except Exception:
         return []
+    out = []
+    for r in rows:
+        code = str(r.get("代码") or "").zfill(6)
+        if not code or code == "000000":
+            continue
+        zt_stat = str(r.get("涨停统计") or "").strip()
+        lb = r.get("连板数")
+        if lb is None:
+            lb = _zt_count_from_stats(zt_stat)
+        cap = to_float(r.get("流通市值"))
+        out.append({
+            "code": code, "name": str(r.get("名称") or "").strip(),
+            "industry": str(r.get("所属行业") or "").strip(),
+            "ztCount": zt_stat, "lb": int(lb) if lb else None,
+            "sealAmount": to_float(r.get("封板资金")),
+            "floatCapYi": round(cap / 1e8, 2) if cap else None,
+        })
+    return out
 
 
 def _fetch_market_activity():
@@ -3671,8 +3706,9 @@ def scan_tactics(date_str):
         print("[tactics] %s 无涨停池，跳过" % date_str, flush=True)
         return False
     rules = tactics_engine.load_rules(TACTICS_RULES_FILE)
-    # 候选：首板(lb=1) 或 2板(lb=2)
-    cands = [r for r in rows if (r.get("lb") or 0) in (1, 2)]
+    # 候选：首板(lb=1) / 二板(lb=2) / 三板(lb=3，手册「三板缩量优先」)
+    lb_max = int(rules.get("candLbMax") or 3)
+    cands = [r for r in rows if 1 <= (r.get("lb") or 0) <= lb_max]
     # 市场环境（供叠加）
     env = load_env(date_str) or {}
     concl = env.get("conclusion") or {}
@@ -3684,7 +3720,7 @@ def scan_tactics(date_str):
         ind = str(r.get("industry") or "").strip()
         if ind:
             sector_zt[ind] = sector_zt.get(ind, 0) + 1
-    # 流通市值（亿）：用全市场快照 ltsz（可靠），日K volume 单位不统一不可反推
+    # 流通市值（亿）：优先全市场快照 ltsz；历史日回落涨停池自带「流通市值」列
     cap_map = {}
     try:
         sdf = _get_spot_df(date_str)
@@ -3696,16 +3732,23 @@ def scan_tactics(date_str):
                 pass
     except Exception as exc:
         print("[tactics] 流通市值快照获取失败: %r" % exc, flush=True)
+    for r in rows:
+        c, fc = r.get("code"), r.get("floatCapYi")
+        if c and fc and not cap_map.get(c):
+            cap_map[c] = fc
     # 板块形态：候选所属新浪行业 → 行业指数（低位站上60线+5/10/20多头向上）
     # 直接读缓存文件（不触发重建，重建需数十分钟；陈旧数据作为加分信号可接受）
     sector_map = load_sector_map()
     name2idx = {}
+    sector_built = None
     try:
         with open(SECTOR_INDEX_FILE, encoding="utf-8") as f:
-            for _lbl, _idx in ((json.load(f) or {}).get("indices") or {}).items():
-                nm = _idx.get("name")
-                if nm:
-                    name2idx[nm] = _idx
+            _sj = json.load(f) or {}
+        sector_built = str(_sj.get("built_at") or "")[:10]
+        for _lbl, _idx in (_sj.get("indices") or {}).items():
+            nm = _idx.get("name")
+            if nm:
+                name2idx[nm] = _idx
     except Exception as exc:
         print("[tactics] 行业指数读取失败: %r" % exc, flush=True)
     out = []
@@ -3714,6 +3757,9 @@ def scan_tactics(date_str):
         if not code:
             continue
         kline = _fetch_kline_full(code, start)
+        # 历史日扫描必须截断到扫描日，否则特征会用到扫描日之后的K线（未来函数）
+        if kline and date_str:
+            kline = [k for k in kline if str(k.get("date") or "")[:10] <= date_str[:10]]
         feats = tactics_engine.analyze_kline(kline, rules)
         if not feats:
             continue
@@ -3723,11 +3769,35 @@ def scan_tactics(date_str):
         s_zt = sector_zt.get(ind, 0)
         # 板块形态（按新浪行业指数）
         sec_name = sector_map.get(str(code).zfill(6))
-        sector_form = tactics_engine.judge_sector(name2idx.get(sec_name)) if sec_name else None
+        idx_entry = name2idx.get(sec_name) if sec_name else None
+        sector_form = tactics_engine.judge_sector(idx_entry) if idx_entry else None
+        lb = int(r.get("lb") or 1)
+        # 手册规则层：换手率阶梯 / 压力位 / 庄股 / 连阳 / 逆势 / 六维 / 四关 / 仓位
+        sector_closes = (idx_entry or {}).get("closes") or []
+        last_idx_date = str(((idx_entry or {}).get("dates") or [""])[-1])[:10]
+        stale = None
+        if last_idx_date:
+            try:
+                stale = (datetime.strptime(date_str[:10], "%Y-%m-%d")
+                         - datetime.strptime(last_idx_date, "%Y-%m-%d")).days
+            except ValueError:
+                stale = None
+        # 起爆点（手册 3.8 的近似）：站上60线 + 倍量 + 窄箱体（位置未高）
+        jipoint = bool(feats.get("aboveMa60") and (feats.get("prevVolRatio") or 0) >= rules["volDoubleMult"]
+                       and (feats.get("boxWidth") is not None
+                            and feats["boxWidth"] < rules["boxWidthMax"]))
+        strategy = tactics_engine.judge_strategy(
+            feats, lb, tactics_engine.LADDER_RULES,
+            {"floatCapYi": feats.get("floatCapYi"), "price": feats.get("close"),
+             "sectorZt": s_zt, "sectorCloses": sector_closes, "sectorStaleDays": stale,
+             "aboveMa60": feats.get("aboveMa60"), "breakMa60": feats.get("breakMa60"),
+             "jipoint": jipoint})
+        ladder = (strategy or {}).get("ladder")
         stage, stage_desc = tactics_engine.judge_turnover_stage(feats.get("turnoverSeq") or [], rules)
         score, hits, warns = tactics_engine.score_candidate(feats, stage, rules, sector_zt_count=s_zt,
-                                                            sector_form=sector_form)
+                                                            sector_form=sector_form, ladder=ladder)
         reso = tactics_engine.judge_resonance(hits, stage, s_zt, rules)
+        four = (strategy or {}).get("fourGate") or {}
         out.append({
             "code": code, "name": r.get("name") or "", "industry": r.get("industry") or "",
             "lb": r.get("lb"), "sealAmount": r.get("sealAmount"), "sectorZt": s_zt,
@@ -3741,22 +3811,40 @@ def scan_tactics(date_str):
             "maConverge": feats.get("maConverge"), "floatCapYi": feats.get("floatCapYi"),
             "upside": feats.get("upside"), "volRatio": feats.get("volRatio"),
             "prevVolRatio": feats.get("prevVolRatio"),
+            # 手册规则层（前端直接展示）
+            "ladderNode": (ladder or {}).get("ladder"),
+            "ladderGrade": (ladder or {}).get("grade"),
+            "ladderAction": (ladder or {}).get("action"),
+            "ladderTone": (ladder or {}).get("tone"),
+            "ladderShrink": (ladder or {}).get("shrink"),
+            "verdict": four.get("verdict"), "position": four.get("position"),
+            "positionTone": four.get("positionTone"),
+            "lianyang": ((strategy or {}).get("lianyang") or {}).get("count"),
+            "counterTrend": ((strategy or {}).get("counterTrend") or {}).get("verdict"),
+            "strategy": strategy,
         })
-    out.sort(key=lambda x: (x.get("score") or 0), reverse=True)
+    # 排序：手册四关结论优先（可买 < 观察 < 回避），同档再比得分
+    _rank = {"可买": 0, "观察": 1, "回避": 2}
+    out.sort(key=lambda x: (_rank.get(x.get("verdict"), 3), -(x.get("score") or 0)))
     resonant = [c for c in out if (c.get("resonance") or {}).get("resonant")]
-    others = [c for c in out if not (c.get("resonance") or {}).get("resonant")]
     top_n = rules.get("topN", 20)
-    picked = resonant[:top_n]        # 三方共振：主列表
-    folded = others[:top_n]          # 孤军（非共振）：折叠区
+    # 主列表：三方共振且未被四关否决（回避=不参与，放折叠区）
+    picked = [c for c in resonant if c.get("verdict") != "回避"][:top_n]
+    picked_codes = {c["code"] for c in picked}
+    folded = [c for c in out if c["code"] not in picked_codes][:top_n]
+    verdict_n = {k: sum(1 for c in out if c.get("verdict") == k) for k in ("可买", "观察", "回避")}
     day = {"date": date_str, "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-           "scanned": len(cands), "resonantN": len(resonant), "otherN": len(others),
+           "scanned": len(cands), "candLbMax": lb_max,
+           "resonantN": len(resonant), "otherN": len(out) - len(picked),
+           "verdictN": verdict_n, "sectorBuilt": sector_built,
            "market": market_ctx, "candidates": picked, "others": folded}
     try:
         os.makedirs(TACTICS_DIR, exist_ok=True)
         with open(os.path.join(TACTICS_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
             json.dump(day, f, ensure_ascii=False)
-        print("[tactics] %s 扫描 %d 只首板/2板，三方共振 %d 只，孤军 %d 只" % (
-            date_str, len(cands), len(resonant), len(others)), flush=True)
+        print("[tactics] %s 扫描 %d 只首板~%d板，三方共振 %d 只，入选 %d 只（可买%d/观察%d/回避%d）" % (
+            date_str, len(cands), lb_max, len(resonant), len(picked),
+            verdict_n["可买"], verdict_n["观察"], verdict_n["回避"]), flush=True)
         return True
     except Exception as exc:
         print("[tactics] %s 落盘失败: %r" % (date_str, exc), flush=True)

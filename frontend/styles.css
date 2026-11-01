@@ -735,6 +735,12 @@ th[data-key].is-drop-target {
   color: var(--accent-strong);
 }
 
+.dim {
+  color: var(--text-2);
+  font-size: 11px;
+  margin-left: 4px;
+}
+
 .tag-warn {
   background: var(--warn-bg);
   color: var(--warn);
