@@ -87,6 +87,28 @@ def forward_returns(kline, date_str, horizons=(1, 2, 3)):
     return out
 
 
+def _pct(values):
+    """池内分位（与 backend/server.py 的 _cs_percentiles 同口径）。"""
+    n = len(values)
+    if n == 0:
+        return []
+    if n == 1:
+        return [100.0]
+    keyed = [(v if v is not None else float("-inf")) for v in values]
+    order = sorted(range(n), key=lambda i: keyed[i])
+    out = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and keyed[order[j + 1]] == keyed[order[i]]:
+            j += 1
+        mid = (i + j) / 2.0
+        for k in range(i, j + 1):
+            out[order[k]] = round(mid / (n - 1) * 100.0, 1)
+        i = j + 1
+    return out
+
+
 def avg(vals):
     vals = [v for v in vals if v is not None]
     return round(sum(vals) / len(vals), 2) if vals else None
@@ -157,15 +179,20 @@ def main():
                  "aboveMa60": feats.get("aboveMa60"), "breakMa60": feats.get("breakMa60")})
             lad = (strategy or {}).get("ladder") or {}
             four = (strategy or {}).get("fourGate") or {}
+            stage, _sdesc = tactics_engine.judge_turnover_stage(
+                feats.get("turnoverSeq") or [], rules)
+            strategy_raw, _h, _w = tactics_engine.score_candidate(
+                feats, stage, rules, sector_zt_count=0, ladder=lad,
+                adjust=(strategy or {}).get("scoreAdjust") or 0)
             fr = forward_returns(kline, d)
             if not fr:
                 continue
             ok += 1
             rows.append({
                 "date": d, "code": code, "name": r.get("name"), "lb": lb,
-                "grade": lad.get("grade") or "—", "verdict": four.get("verdict") or "—",
+                "grade": lad.get("grade") or "—", "verdictHard": four.get("verdict") or "—",
                 "position": four.get("position") or "—",
-                "turnover": lad.get("latest"),
+                "turnover": lad.get("latest"), "raw": strategy_raw,
                 **fr,
             })
         print("  %s 候选 %d 只，可回测 %d 只" % (d, len(cands), ok), flush=True)
@@ -174,6 +201,21 @@ def main():
         print("无有效样本")
         return 1
     print("\n数据源：%s" % dict(src_stat))
+
+    # 复刻生产逻辑：先按阶梯剔掉超标/高风险，再在当日池内做分位，再二分可买/观察
+    EXCL = ("超标", "剔除", "高风险")
+    by_day = defaultdict(list)
+    for r in rows:
+        by_day[r["date"]].append(r)
+    for d, items in by_day.items():
+        keep = [r for r in items if r["grade"] not in EXCL]
+        pcts = _pct([r.get("raw") or 0 for r in keep])
+        for r, p in zip(keep, pcts):
+            r["verdict"] = ("回避" if r.get("verdictHard") == "回避"
+                            else ("可买" if p >= 60 else "观察"))
+        for r in items:
+            if r["grade"] in EXCL:
+                r["verdict"] = "剔除"
 
     print("\n=== 基线：全部候选（%d 条）===" % len(rows))
     print("  T+1 %.2f%%  T+2 %.2f%%  T+3 %.2f%%  T+1开盘 %.2f%%  胜率 %.1f%%  T+1涨停 %.1f%%" % (

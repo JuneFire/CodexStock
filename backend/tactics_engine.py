@@ -169,12 +169,14 @@ def judge_turnover_stage(turnover_seq, rules):
     return "常规", ""
 
 
-def score_candidate(features, stage, rules, sector_zt_count=0, sector_form=None, ladder=None):
+def score_candidate(features, stage, rules, sector_zt_count=0, sector_form=None, ladder=None,
+                    adjust=0):
     """技术面特征 + 阶段 + 板块涨停家数 + 板块形态 → (score, hits[], warns[])。
 
     三方共振：消息面(板块热度近似) + 板块(同行业涨停家数) + 个股(技术面/换手率)。
     sector_form: judge_sector 的结果；good=True 时加板块形态分。
     ladder: judge_ladder 的结果；按手册换手率阶梯给档位加减分。
+    adjust: judge_strategy 的软项加权分（庄股/连阳/逆势），已在四关里算好。
     """
     w = rules["weights"]
     sc = 0
@@ -225,6 +227,9 @@ def score_candidate(features, stage, rules, sector_zt_count=0, sector_form=None,
             sc += w.get("ladderWarn", 0); warns.append("阶梯%s(%s)" % (grade, ladder.get("action") or ""))
         elif grade in ("超标", "剔除"):
             sc += w.get("ladderExclude", 0); warns.append("阶梯%s：%s" % (grade, ladder.get("action") or ""))
+    if adjust:
+        sc += adjust
+        hits.append("软项加权%+d" % adjust) if adjust > 0 else warns.append("软项加权%+d" % adjust)
     return max(0, sc), hits, warns
 
 
@@ -669,56 +674,111 @@ def _six_dim(feats, board, ctx, rules, pressure, zhuang):
     return items
 
 
+EXIT_PLAN = {"holdDays": 1, "exitAt": "次日开盘", "backup": "次日收盘",
+             "note": "回测(14日/695样本)：T+1开盘 +1.78% > T+1收盘 +0.96% > T+2 +0.23% > T+3 -0.11%"}
+
+
 def _four_gate(ladder, pressure, lianyang, counter, gate6, ctx, rules):
-    """四关串联（手册 3.8）：三关筛票 + 一关定仓。任一关否决即不介入。"""
-    fails = [g for g in gate6 if g["status"] == "fail"]
-    # 无数据（unknown）保守拦为「观察」；需人工核对的（manual）不拦，只提示
-    unknown = [g for g in gate6 if g["status"] == "unknown"]
-    manual = [g["label"] for g in gate6 if g["status"] == "manual"]
-    gates = []
-    # 第一关：概念持续性/传播力 —— 无概念图谱数据源，需人工（手册：否=终局放弃）
-    gates.append({"gate": 1, "name": "概念持续性/传播力", "status": "manual",
-                  "detail": "需人工判断：能否持续 + 能否传播（否=终局放弃）"})
-    # 第二关：板块时间节点 —— 用个股连阳近似（概念指数连阳≥6 视为高位）
+    """硬否决 + 软项加权（2026-11 回测结论重做）。
+
+    旧四关把庄股/连阳/逆势当一票否决，回测显示「可买 vs 回避」几乎无差
+    （+1.03% vs +0.95%），这三项没有独立 alpha。现改为：
+      硬否决：阶梯超标 / 压力位不通过 / 连阳≥空仓线 / 板块连跌≥3天 / 六维盘子否决
+      软项加权：阶梯档位、连阳 4~7、逆势 1~2 天、庄股形态 → scoreAdjust
+    verdict 在这里只给「通过/回避」，可买/观察由调用方按池内分位切。
+    """
+    adj, notes, blocked = 0, [], []
+    ly = rules["lianyang"]
+
+    if ladder is None:
+        notes.append("换手率阶梯数据不足")
+    elif ladder.get("exclude"):
+        blocked.append(("换手率阶梯", ladder.get("action") or "超标"))
+    elif ladder.get("grade") == "最优":
+        adj += 4; notes.append("阶梯最优%d档 +4" % (ladder.get("ladder") or 0))
+    elif ladder.get("grade") in ("超标", "剔除", "高风险"):
+        blocked.append(("换手率阶梯", "%s%s档：%s" % (ladder.get("grade"),
+                        ladder.get("ladder") or "", ladder.get("action") or "")))
+    elif ladder.get("grade") == "警戒":
+        adj -= 6; notes.append("阶梯警戒 -6")
+    elif ladder.get("grade") == "次优" and str(ladder.get("action") or "").startswith("偏弱"):
+        adj -= 2; notes.append("阶梯次优偏弱 -2")
+
+    if pressure is None:
+        notes.append("压力位数据不足")
+    elif not pressure.get("pass"):
+        blocked.append(("压力位", pressure.get("note")))
+
     if lianyang is None:
-        gates.append({"gate": 2, "name": "板块时间节点", "status": "unknown", "detail": "数据不足"})
+        notes.append("连阳数据不足")
     else:
-        ok2 = lianyang["count"] < rules["lianyang"]["noNew"]
-        gates.append({"gate": 2, "name": "板块时间节点",
-                      "status": "pass" if ok2 else "fail",
-                      "detail": "个股%d连阳，%s" % (lianyang["count"], lianyang["action"])})
-    # 第三关：盘口贴合/压力位/风险 —— 连阳否决 + 压力位 + 六维否决项
-    g3_status, g3_detail = "pass", "连阳未到高位且压力位通过"
-    if lianyang is not None and lianyang["count"] >= rules["lianyang"]["noNew"]:
-        g3_status, g3_detail = "fail", "%d连阳高位，不介入" % lianyang["count"]
-    elif pressure is not None and not pressure["pass"]:
-        g3_status, g3_detail = "fail", pressure["note"]
-    elif fails:
-        g3_status, g3_detail = "fail", "六维否决：" + "、".join(g["label"] for g in fails)
-    gates.append({"gate": 3, "name": "盘口贴合/压力位/风险",
-                  "status": g3_status, "detail": g3_detail})
-    # 第四关：仓位（起爆点由调用方近似判定：站上MA60 + 倍量 + 低位）
+        c = lianyang.get("count") or 0
+        if c >= ly["empty"]:
+            blocked.append(("连阳高位", "%d连阳→空仓线" % c))
+        elif c >= ly["cut"]:
+            adj -= 10; notes.append("%d连阳→减仓 -10" % c)
+        elif c >= ly["noNew"]:
+            adj -= 6; notes.append("%d连阳→不新开仓 -6" % c)
+        elif c >= 4:
+            adj -= 2; notes.append("%d连阳 -2" % c)
+
+    if counter:
+        v = counter.get("verdict")
+        if v == "必须走":
+            blocked.append(("板块逆势", counter.get("note") or "连跌≥3天"))
+        elif v == "勉强承接":
+            adj -= 6; notes.append("板块连跌2天 -6")
+        elif v == "可参与":
+            adj -= 2; notes.append("板块连跌1天 -2")
+
+    gate6 = gate6 or []
+    for g in gate6:
+        if g.get("key") == "cap" and g.get("status") == "fail":
+            blocked.append(("盘子", g.get("detail")))
+        elif g.get("key") == "zhuang":
+            if g.get("status") == "pass":
+                adj += 6; notes.append("庄股控盘形态 +6")
+            elif g.get("status") == "fail":
+                adj -= 4; notes.append("未控盘 -4")
+    manual = [g["label"] for g in gate6 if g.get("status") == "manual"]
+    unknown = [g["label"] for g in gate6 if g.get("status") == "unknown"]
+
     is_ji = bool(ctx.get("jipoint"))
     strong = (ctx.get("sectorZt") or 0) >= 3
-    if is_ji:
+    if blocked:
+        pos, pos_tone = "不参与", "down"
+    elif is_ji:
         pos, pos_tone = "重仓", "up"
     elif strong:
         pos, pos_tone = "五成", "warn"
     else:
         pos, pos_tone = "三成", "warn"
-    gates.append({"gate": 4, "name": "仓位", "status": "pass",
-                  "detail": ("起爆点→重仓" if is_ji else
-                             ("非起爆点·概念强→五成" if strong else "非起爆点·概念一般→三成"))})
-    blocked = [g for g in gates if g["status"] == "fail"]
-    if blocked:
-        verdict, pos, pos_tone = "回避", "不参与", "down"
-    elif unknown:
-        verdict, pos, pos_tone = "观察", "待人工复核", "flat"
-    else:
-        verdict = "可买"
-    return {"gates": gates, "verdict": verdict, "position": pos, "positionTone": pos_tone,
-            "blocked": [g["gate"] for g in blocked],
-            "manualChecks": manual}
+
+    def _g(no, name, ok, detail, warn=False):
+        return {"gate": no, "name": name, "detail": detail,
+                "status": "fail" if not ok else ("warn" if warn else "pass")}
+
+    ladder_ok = not (ladder and ladder.get("exclude"))
+    gates = [
+        {"gate": 1, "name": "概念持续性/传播力", "status": "manual",
+         "detail": "需人工判断：能否持续 + 能否传播（否=终局放弃）"},
+        _g(2, "板块时间节点/逆势", not (counter and counter.get("verdict") == "必须走"),
+           (counter or {}).get("note") or "板块未连续下跌",
+           warn=bool(counter and counter.get("verdict") in ("勉强承接", "可参与"))),
+        _g(3, "压力位/阶梯/盘子", ladder_ok and bool(pressure and pressure.get("pass"))
+           and not any(b[0] in ("压力位", "盘子", "连阳高位") for b in blocked),
+           "；".join("%s：%s" % (b[0], b[1]) for b in blocked) if blocked
+           else ((pressure or {}).get("note") or "压力位通过")),
+        _g(4, "仓位", not blocked, "起爆点→重仓" if is_ji else
+           ("非起爆点·概念强→五成" if strong else "非起爆点·概念一般→三成")),
+    ]
+
+    return {"gates": gates, "verdict": "回避" if blocked else "通过",
+            "position": pos, "positionTone": pos_tone,
+            "blocked": [b[0] for b in blocked],
+            "blockedDetail": ["%s：%s" % (b[0], b[1]) for b in blocked],
+            "scoreAdjust": adj, "adjustNotes": notes,
+            "manualChecks": manual, "unknownChecks": unknown}
 
 
 def judge_strategy(feats, board, rules=None, ctx=None):
@@ -742,12 +802,8 @@ def judge_strategy(feats, board, rules=None, ctx=None):
                                   ctx.get("sectorStaleDays"))
     gate6 = _six_dim(feats, board, ctx, r, pressure, zhuang)
     four = _four_gate(ladder, pressure, lianyang, counter, gate6, ctx, r)
-    if ladder and ladder["exclude"] and four["verdict"] != "回避":
-        four.update(verdict="回避", position="不参与", positionTone="down")
-    if counter and counter.get("verdict") == "必须走" and four["verdict"] != "回避":
-        four.update(verdict="回避", position="不参与", positionTone="down")
     return {"ladder": ladder, "pressure": pressure, "zhuang": zhuang,
             "lianyang": lianyang, "counterTrend": counter, "gate6": gate6,
-            "fourGate": four}
+            "fourGate": four, "exit": dict(EXIT_PLAN), "scoreAdjust": four.get("scoreAdjust") or 0}
 
 

@@ -3796,7 +3796,8 @@ def scan_tactics(date_str):
         ladder = (strategy or {}).get("ladder")
         stage, stage_desc = tactics_engine.judge_turnover_stage(feats.get("turnoverSeq") or [], rules)
         score, hits, warns = tactics_engine.score_candidate(feats, stage, rules, sector_zt_count=s_zt,
-                                                            sector_form=sector_form, ladder=ladder)
+                                                            sector_form=sector_form, ladder=ladder,
+                                                            adjust=(strategy or {}).get("scoreAdjust") or 0)
         raw_score = score
         reso = tactics_engine.judge_resonance(hits, stage, s_zt, rules)
         four = (strategy or {}).get("fourGate") or {}
@@ -3817,6 +3818,8 @@ def scan_tactics(date_str):
             "ladderNode": (ladder or {}).get("ladder"),
             "ladderGrade": (ladder or {}).get("grade"),
             "ladderAction": (ladder or {}).get("action"),
+            "exitRule": ((strategy or {}).get("exit") or {}).get("exitAt"),
+            "blocked": ((strategy or {}).get("fourGate") or {}).get("blocked") or [],
             "ladderTone": (ladder or {}).get("tone"),
             "ladderShrink": (ladder or {}).get("shrink"),
             "verdict": four.get("verdict"), "position": four.get("position"),
@@ -3825,9 +3828,32 @@ def scan_tactics(date_str):
             "counterTrend": ((strategy or {}).get("counterTrend") or {}).get("verdict"),
             "strategy": strategy,
         })
+    # 阶梯超标/高风险直接剔除（回测：超标档 T+1 +0.17%、高风险档 -2.20%，不参与打分）
+    excluded = [c for c in out if c.get("ladderGrade") in ("超标", "剔除", "高风险")]
+    out = [c for c in out if c.get("ladderGrade") not in ("超标", "剔除", "高风险")]
+
     # 得分改池内横截面分位：原来简单加和封顶 100，多头/倍量全中就全部 100 无区分度
     for c, pct in zip(out, _cs_percentiles([c.get("rawScore") or 0 for c in out])):
         c["score"] = pct
+
+    # 结论分层（2026-11 回测定标）：阶梯档位定结论，四关只在中低档生效
+    #   可买 = 阶梯最优/次优（即使有硬项否决也只标风险，回测 2.55% vs 1.36% 无差异）
+    #   观察 = 阶梯中性/警戒/健康 且 硬项通过
+    #   回避 = 阶梯中性/警戒/健康 且 硬项否决（回测 0.67%/-0.84%）
+    for c in out:
+        grade = c.get("ladderGrade")
+        hard_block = c.get("verdict") == "回避"
+        if grade in ("最优", "次优"):
+            c["verdict"] = "可买"
+            if hard_block:
+                c["verdictNote"] = "有否决项（%s），但阶梯%s，按回测保留" % (
+                    "/".join(c.get("blocked") or []) or "—", grade)
+                # 否决项不能吞掉仓位建议，只降一档提示
+                c["position"] = "五成" if (c.get("sectorZt") or 0) >= 3 else "三成"
+                c["positionTone"] = "warn"
+        else:
+            c["verdict"] = "回避" if hard_block else "观察"
+        c["heat"] = "过热" if (c.get("score") or 0) >= 80 else ("偏冷" if (c.get("score") or 0) <= 40 else "")
 
     # 排序：手册四关结论优先（可买 < 观察 < 回避），同档再比得分
     _rank = {"可买": 0, "观察": 1, "回避": 2}
@@ -3843,13 +3869,18 @@ def scan_tactics(date_str):
            "scanned": len(cands), "candLbMax": lb_max,
            "resonantN": len(resonant), "otherN": len(out) - len(picked),
            "verdictN": verdict_n, "sectorBuilt": sector_built,
+           "excludedN": len(excluded),
+           "excluded": [{"code": c["code"], "name": c["name"], "lb": c.get("lb"),
+                         "ladderGrade": c.get("ladderGrade"), "latestTurnover": c.get("latestTurnover")}
+                        for c in excluded],
+           "exitRule": tactics_engine.EXIT_PLAN.get("exitAt"),
            "market": market_ctx, "candidates": picked, "others": folded}
     try:
         os.makedirs(TACTICS_DIR, exist_ok=True)
         with open(os.path.join(TACTICS_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
             json.dump(day, f, ensure_ascii=False)
-        print("[tactics] %s 扫描 %d 只首板~%d板，三方共振 %d 只，入选 %d 只（可买%d/观察%d/回避%d）" % (
-            date_str, len(cands), lb_max, len(resonant), len(picked),
+        print("[tactics] %s 扫描 %d 只首板~%d板，剔除超标 %d 只，三方共振 %d 只，入选 %d 只（可买%d/观察%d/回避%d）" % (
+            date_str, len(cands), lb_max, len(excluded), len(resonant), len(picked),
             verdict_n["可买"], verdict_n["观察"], verdict_n["回避"]), flush=True)
         return True
     except Exception as exc:
