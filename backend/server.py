@@ -72,6 +72,7 @@ NEWSTOCKS_DIR = os.path.join(DATA_DIR, "newstocks")  # 上市首日/次新(N/C)�
 CONGESTION_DIR = os.path.join(DATA_DIR, "congestion")  # 量窒息检测
 REVIEW_TEXT_DIR = os.path.join(DATA_DIR, "review_text")  # 每日四层复盘文本（大盘/情绪/板块/个股）
 AUCTION_TOP_DIR = os.path.join(DATA_DIR, "auction_top")  # 竞价额前N榜单归档（文件兜底，MySQL 不可用时降级读这里）
+SEAL_DIR = os.path.join(DATA_DIR, "seal")  # 三时点封单归档（MySQL 不可用时的权威存档）
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -151,6 +152,7 @@ AUCTION_TOP_N = 50          # 竞价金额抓取前 N 只（腾讯/东财/akshar
 AUCTION_DYN_TTL = 90        # 竞价动态页增强数据缓存秒数
 AUCTION_DYN_CACHE = {"ts": 0.0, "date": None, "rows": None}
 AUCTION_TOP_RANK_N = 60     # 竞价榜页面取竞价额前 N（按日期归档）
+AUCTION_USE_HITHINK = True  # 09:25 竞价榜主源用同花顺全市场快照（腾讯在 09:25:0x 常没刷新成交额）
 
 PLAN_FETCH_HM = 8 * 60 + 30  # 早晨 8:30 自动生成当天早盘预案
 PLAN_NEWS_LIMIT = 8          # 预案引用的隔夜快讯条数
@@ -1887,6 +1889,52 @@ def fetch_seal_top20(sample_time, now=None):
     }
 
 
+def save_seal_file(records):
+    """三时点封单落盘 data/seal/<date>.json（MySQL 不可用时的权威存档）。
+
+    结构 {"date","updatedAt","times":{"09:15":[rec,...],"09:20":[...],"09:25":[...]}}。
+    同一天同一时点重复采样时覆盖该时点，其它时点保留。返回 (ok, msg)。
+    """
+    records = [r for r in (records or []) if r.get("sampleTime")]
+    if not records:
+        return False, "封单记录为空"
+    date_str = str(records[0].get("tradeDate") or "")[:10]
+    if not date_str:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    os.makedirs(SEAL_DIR, exist_ok=True)
+    path = os.path.join(SEAL_DIR, date_str + ".json")
+    with _lock:
+        times = {}
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    times = (json.load(f) or {}).get("times") or {}
+            except (OSError, ValueError):
+                times = {}
+        for r in records:
+            t = str(r.get("sampleTime"))
+            times[t] = [x for x in records if str(x.get("sampleTime")) == t]
+        payload = {"date": date_str,
+                   "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   "times": times}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    return True, path
+
+
+def _seal_json_day(date_str):
+    """读 data/seal/<date>.json，返回 {sample_time: [rec,...]}；无存档返回 {}。"""
+    path = os.path.join(SEAL_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+    return data.get("times") or {}
+
+
 def _run_seal_sample(sample_time):
     now = datetime.now()
     # 双保险：非交易日（含节假日）直接跳过，一个请求都不发
@@ -1898,8 +1946,12 @@ def _run_seal_sample(sample_time):
         if not snap["records"]:
             print("[seal] %s 封单抓取为空，跳过入库" % sample_time, flush=True)
             return
+        # 文件归档是权威源（服务器没装 MySQL，不能只靠数据库）
+        ok_file, msg = save_seal_file(snap["records"])
+        if not ok_file:
+            print("[seal] %s 文件落盘失败: %s" % (sample_time, msg), flush=True)
         if not db.save_seal(snap["records"]):
-            print("[seal] %s 入库失败: %s" % (sample_time, db.last_error()), flush=True)
+            print("[seal] %s MySQL 入库失败（已写 JSON）: %s" % (sample_time, db.last_error()), flush=True)
         else:
             print("[seal] %s 封单入库 %d 条（全市场 %d 只有买一，其中涨停封板 %d 只，扫描 %d 只）" % (
                 sample_time, len(snap["records"]), snap["poolCount"],
@@ -1971,12 +2023,20 @@ def _load_seal_times(date_str):
       - lbuy = 涨停委买额，只有 买一价 ≥ 涨停价×0.999 才是它本身，否则 0
     两者分开是因为竞价排行里的「封单额」是买一最大挂单（非涨停股也可能很大），
     而「涨停委买额」必须封在涨停价上——混用会错得很难看。
-    MySQL 不可用时返回 {}，不影响调用方。
+    MySQL 不可用时回落读 data/seal/<date>.json（服务器无 MySQL 时靠它工作），
+    两边都空则返回 {}，不影响调用方。
     """
     try:
         rows = db.get_seal(date_str)
     except Exception:
-        return {}
+        rows = []
+    if not rows:
+        rows = []
+        for t, items in (_seal_json_day(date_str) or {}).items():
+            for r in items or []:
+                rec = dict(r)
+                rec["sampleTime"] = rec.get("sampleTime") or t
+                rows.append(rec)
     out = {}
     for r in rows or []:
         code = str(r.get("code") or "")
@@ -2086,22 +2146,18 @@ def _auction_dyn_enrich(records):
     return out
 
 
-def fetch_auction_top(n=AUCTION_TOP_RANK_N):
-    """抓取竞价额前 N 的榜单，按竞价额降序补 rank。
+def _finalize_auction_top(snapshot, n, now=None, source_label=""):
+    """竞价榜记录收尾：补板块、竞价量比、封单额、rank。
 
-    量比列：腾讯源在竞价窗口返回的 lb 恒为 0（量比需盘中累计时间才能算），
-    故改为"竞价量比" = 今日竞价量 / 昨日竞价量（昨日取自竞价榜归档），缺昨日数据则为 null。
-    封单额列：对榜单股票取腾讯买一量×买一价（fetch_seal_quotes，与首页 _build_snapshot 同源），无买一则为 null。
-    返回 {"date","records":[{...,"rank","tradeDate","fetchedAt"}],"scanned":n}
+    量比：优先用行情源自带的量比；缺失（腾讯竞价窗口 lb 恒为 0）才用
+    "竞价量比" = 今日竞价量 / 昨日竞价量（昨日取自竞价榜归档）。
+    封单额：对榜单股票取腾讯买一量×买一价（fetch_seal_quotes，与首页 _build_snapshot 同源）。
     """
-    now = datetime.now()
-    snapshot, _ = fetch_auction_snapshot(top_n=n)
-    # 板块补齐：腾讯源行业恒为"其他"，用新浪行业映射补（与 _build_snapshot 一致）
+    now = now or datetime.now()
     sector_map = load_sector_map()
     for s in snapshot:
         if not s.get("industry") or s["industry"] in ("其他", ""):
             s["industry"] = sector_map.get(s["code"], "其他")
-    # 昨日竞价量（算"竞价量比"用），取自竞价榜文件归档
     today = now.strftime("%Y-%m-%d")
     prev_vol_map = {}
     prev_date = _prev_data_date(AUCTION_TOP_DIR, today)
@@ -2110,24 +2166,72 @@ def fetch_auction_top(n=AUCTION_TOP_RANK_N):
             code, vol = r.get("code"), r.get("auctionVolume")
             if code and vol:
                 prev_vol_map[code] = vol
-    # 封单额：对榜单股票取腾讯买一量×买一价（与首页封单同源）
     seal_quotes = fetch_seal_quotes([s.get("code") for s in snapshot if s.get("code")]) or {}
     records = []
     for idx, s in enumerate(snapshot, start=1):
         rec = dict(s)
         vol = s.get("auctionVolume")
         pv = prev_vol_map.get(s.get("code"))
-        rec["volumeRatio"] = round(vol / pv, 2) if (vol and pv) else None
+        if not to_float(rec.get("volumeRatio")) and vol and pv:
+            rec["volumeRatio"] = round(vol / pv, 2)
         q = seal_quotes.get(s.get("code")) or {}
         rec["sealAmount"] = q.get("sealAmount")
         rec["rank"] = idx
         rec["tradeDate"] = today
         rec["fetchedAt"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        rec["src"] = s.get("src") or source_label
         records.append(rec)
+    return records
+
+
+def _hithink_is_limit_up(rec):
+    """同花顺行是否竞价封涨停（用价格直接比涨停价，不用涨幅百分比）。"""
+    code, name = str(rec.get("code") or ""), str(rec.get("name") or "")
+    lpx = _limit_up_price(to_float(rec.get("prevClose")), code, name)
+    px = to_float(rec.get("price"))
+    return bool(lpx and px and px >= lpx - 0.005)
+
+
+def _hithink_auction_stocks(top_n):
+    """同花顺全市场竞价快照（模块缺失/无 Key 时抛错，由调用方降级）。"""
+    try:
+        from hithink_feed import fetch_auction_stocks
+    except Exception:
+        from backend.hithink_feed import fetch_auction_stocks
+    return fetch_auction_stocks(top_n=top_n, stage="live", keep=_hithink_is_limit_up)
+
+
+def fetch_auction_top(n=AUCTION_TOP_RANK_N):
+    """抓取竞价额前 N 的榜单，按竞价额降序补 rank。
+
+    主源：同花顺 auction/snapshot 全市场快照。腾讯在 09:25:0x 常还没刷新成交额，
+    会把竞价额最大的若干只按 amount<=0 过滤掉（2026-10-30 实测漏掉前 19 名）；
+    悟道 MCP 免费版 09:15-10:30 停服，也不能当 09:25 主源。
+    降级：腾讯 → 东财 → akshare（fetch_auction_snapshot）。
+    返回 {"date","records":[{...,"rank","tradeDate","fetchedAt"}],"scanned":n,"source"}
+    """
+    now = datetime.now()
+    snapshot, source, scanned = None, "", n
+    if AUCTION_USE_HITHINK:
+        try:
+            res = _hithink_auction_stocks(n)
+            if res.get("stocks"):
+                snapshot, source = res["stocks"], "同花顺"
+                scanned = res.get("scanned") or n
+                print("[fetch] 竞价源=同花顺，%d 只（全市场 %d 只参与竞价）" % (
+                    len(snapshot), scanned), flush=True)
+        except Exception as exc:
+            print("[fetch] 同花顺竞价快照失败，降级腾讯: %r" % (exc,), flush=True)
+    if not snapshot:
+        snapshot, source = fetch_auction_snapshot(top_n=n)
+        scanned = n
+    records = _finalize_auction_top(
+        snapshot, n, now, "hithink" if source == "同花顺" else "tencent")
     return {
-        "date": today,
+        "date": now.strftime("%Y-%m-%d"),
         "records": records,
-        "scanned": n,
+        "scanned": scanned,
+        "source": source,
     }
 
 
@@ -2191,9 +2295,10 @@ def _run_auction_top_sample():
         if not ok:
             print("[auction-top] %s，跳过落盘" % msg, flush=True)
             return
-        print("[auction-top] 腾讯源落盘（%d 条）" % len(snap["records"]), flush=True)
-        # 悟道增强：腾讯快照在 09:25:0x 常还没刷新成交额，导致竞价额最大的若干只被
-        # amount<=0 过滤掉（实测漏 3~19 只）；且腾讯没有题材/连板/尾秒。
+        print("[auction-top] %s源落盘（%d 条）" % (snap.get("source") or "主", len(snap["records"])), flush=True)
+        # 悟道增强：主源（同花顺/腾讯）没有题材/连板/尾秒/三点委买额，这里补。
+        # 注意：悟道免费版 09:15-10:30 停服，09:25 必然跳过（日志会打「悟道增强跳过」），
+        # 10:30 后手动重跑 _run_auction_top_sample 才能补上。
         # 这里只做「补票 + 补字段」，失败绝不影响主链路（内部已兜住异常）。
         merge = None
         try:
@@ -2211,7 +2316,7 @@ def _run_auction_top_sample():
             else:
                 snap["records"] = merged
                 ok2, _ = save_auction_top_file(snap)
-                print("[auction-top] 悟道增强 OK：腾讯 %d + 新增 %d = %d 只（补字段 %d 只）%s" % (
+                print("[auction-top] 悟道增强 OK：主源 %d + 新增 %d = %d 只（补字段 %d 只）%s" % (
                     stats["tencent"], stats["added"], stats["total"], stats["enriched"],
                     "" if ok2 else "（重写文件失败）"), flush=True)
         # 文件归档是权威降级源；同时写 MySQL，数据库不可用只记日志不影响页面

@@ -13,6 +13,9 @@
     "webhook": "你的飞书群机器人webhook（可选，open.feishu.cn 获取，推送优先用它）"
   },
   "wudao": {
-    "apiKey": "你的悟道 MCP API Key（stock.quicktiny.cn，用于 09:25 抓完腾讯后补竞价大票与题材/连板/尾秒；不填则跳过增强）"
+    "apiKey": "你的悟道 MCP API Key（stock.quicktiny.cn，用于 09:25 抓完主源后补题材/连板/尾秒；注意免费版 09:15-10:30 停服）"
+  },
+  "hithink": {
+    "apiKey": "你的同花顺金融数据 API Key（fuyao.aicubes.cn，09:25 竞价榜主源；不填则降级腾讯，会漏掉竞价额最大的若干只）"
   }
 }
