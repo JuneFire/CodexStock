@@ -5219,13 +5219,31 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 env = {"ok": False, "error": str(exc)}
 
-            # 三一标记：金额前三 + 换手第一（全市场排名）。
-            # 同花顺源在抓取时已算好 amtRankFull/trfRankFull；历史悟道归档拿不到
-            # 全市场换手，只能用当日榜单内排名近似，并打 sanyiBasis 说明口径。
+            # 三一标记：金额前三 + 换手第一。选票阶段先剔除超大市值（次新股除外），
+            # 依据 scripts/backtest_sanyi_cap.py（242 日）。同花顺源在抓取时已按该口径算好
+            # amtRankFull/trfRankFull；历史悟道归档拿不到全市场换手，只能用当日榜单内排名
+            # 近似，并打 sanyiBasis 说明口径。
+            cap_max, eligible = 3000.0, None
+            try:
+                try:
+                    from hithink_feed import SANYI_CAP_MAX_YI, sanyi_eligible
+                except Exception:
+                    from backend.hithink_feed import SANYI_CAP_MAX_YI, sanyi_eligible
+                cap_max, eligible = SANYI_CAP_MAX_YI, sanyi_eligible
+            except Exception:
+                pass
+            if eligible is None:
+                eligible = lambda rec, **kw: True          # noqa: E731
             if not any("amtRankFull" in r for r in rows):
-                amt_ord = sorted(rows, key=lambda x: to_float(x.get("auctionAmount")) or 0,
+                pool = [r for r in rows if eligible(r, ref_date=date, cap_max=cap_max)]
+                in_pool = {id(r) for r in pool}
+                for r in rows:
+                    if id(r) not in in_pool:
+                        r["sanyiOut"] = "cap"
+                amt_ord = sorted(pool, key=lambda x: to_float(x.get("auctionAmount")) or 0,
                                  reverse=True)
-                trf_ord = sorted(rows, key=lambda x: (to_float(x.get("turnoverRateF"))
+                trf_ord = sorted(pool, key=lambda x: (to_float(x.get("turnoverRateF"))
+                                                     or to_float(x.get("trf"))
                                                      or to_float(x.get("auctionTurnover"))
                                                      or to_float(x.get("turnover")) or 0),
                                  reverse=True)
@@ -5233,6 +5251,11 @@ class Handler(SimpleHTTPRequestHandler):
                     r["amtRankFull"] = i
                 for i, r in enumerate(trf_ord, 1):
                     r["trfRankFull"] = i
+                # 悟道归档同时有「自由流通换手(turnoverRateF)」与「流通/总股本换手(turnover)」
+                # 两套口径；回测（scripts/backtest_sanyi_cap.py）是两者取「或」。
+                trf_ord2 = sorted(pool, key=lambda x: to_float(x.get("turnover")) or 0, reverse=True)
+                for i, r in enumerate(trf_ord2, 1):
+                    r["trfRankFull2"] = i
                 for r in rows:
                     r["sanyiBasis"] = "archive"
             for r in rows:
@@ -5240,7 +5263,11 @@ class Handler(SimpleHTTPRequestHandler):
                     r["sanyiBasis"] = "full"
                 r["isSanyi"] = bool(to_float(r.get("amtRankFull")) and
                                     int(to_float(r.get("amtRankFull"))) <= 3 and
-                                    int(to_float(r.get("trfRankFull")) or 99) == 1)
+                                    (int(to_float(r.get("trfRankFull")) or 99) == 1
+                                     or int(to_float(r.get("trfRankFull2")) or 99) == 1))
+            env = dict(env or {})
+            env["sanyiCapMax"] = cap_max
+            env["sanyiExcluded"] = sum(1 for r in rows if r.get("sanyiOut") == "cap")
 
             AUCTION_DYN_CACHE.update({"ts": time.time(), "date": date, "rows": rows,
                                       "env": env})

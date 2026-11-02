@@ -27,6 +27,11 @@ CACHE_DIR = os.path.join(PROJECT_ROOT, "data", "cache")
 BATCH = 100            # auction/snapshot 单次 thscodes 上限
 TICKER_PAGE = 10000    # meta/tickers/list limit 上限
 WORKERS = 8            # 并发批数（56 批串行 28s，8 并发约 4s）
+# 竞价三一选票池：先剔除流通市值超过该值（亿）的票，次新股除外。
+# 依据 scripts/backtest_sanyi_cap.py（242 交易日）：剔除 >3000 亿后 t 由 2.05 升到 2.34、
+# 累计收益 +144.4% → +181.6%，且原有命中一笔不丢（只新增 10 笔，均值 +3.72%）。
+SANYI_CAP_MAX_YI = 3000.0
+NEW_STOCK_DAYS = 365   # 次新股豁免：距上市不足该天数不按市值剔除
 
 
 def _num(v, default=None):
@@ -116,7 +121,9 @@ def fetch_tickers(key=None, force=False):
         try:
             with open(path, encoding="utf-8") as f:
                 cached = json.load(f) or {}
-            if cached.get("date") == today and cached.get("tickers"):
+            # 旧缓存没有 listDate（次新股豁免要用），视为过期重拉
+            if (cached.get("date") == today and cached.get("tickers")
+                    and cached["tickers"][0].get("listDate") is not None):
                 return cached["tickers"]
         except (OSError, ValueError):
             pass
@@ -133,6 +140,7 @@ def fetch_tickers(key=None, force=False):
                 "thscode": thscode,
                 "ticker": str(it.get("ticker") or thscode.split(".")[0]).strip(),
                 "name": str(it.get("name") or "").strip(),
+                "listDate": str(it.get("list_date") or "").strip()[:10],
             })
         if len(items) < TICKER_PAGE:
             break
@@ -206,7 +214,48 @@ def to_local_row(src):
     }
 
 
-def fetch_auction_stocks(top_n=None, stage="live", key=None, keep=None):
+def list_dates(tickers=None, key=None):
+    """{6位代码: 上市日 YYYY-MM-DD}，用于次新股豁免（来自 fetch_tickers 的 list_date）。"""
+    tickers = tickers if tickers is not None else fetch_tickers(key)
+    out = {}
+    for t in tickers or []:
+        ld = str(t.get("listDate") or "")[:10]
+        if t.get("ticker") and ld:
+            out[str(t["ticker"]).zfill(6)] = ld
+    return out
+
+
+def is_new_stock(code, dates, ref_date):
+    """ref_date 距上市不足 NEW_STOCK_DAYS 天（次新股）。缺数据按「非次新」处理。"""
+    ld = (dates or {}).get(str(code or "").zfill(6))
+    if not ld:
+        return False
+    try:
+        days = (datetime.strptime(str(ref_date)[:10], "%Y-%m-%d")
+                - datetime.strptime(ld, "%Y-%m-%d")).days
+    except ValueError:
+        return False
+    return 0 <= days < NEW_STOCK_DAYS
+
+
+def sanyi_eligible(rec, ref_date=None, cap_max=None, dates=None):
+    """三一选票池准入：流通市值 cap_max（亿）以内，次新股豁免。缺市值不误杀。"""
+    cap_max = SANYI_CAP_MAX_YI if cap_max is None else cap_max
+    if cap_max <= 0:
+        return True
+    cap = _num(rec.get("floatCap")) or _num(rec.get("circMcap"))
+    if not cap:
+        return True
+    if cap / 1e8 <= cap_max:
+        return True
+    if dates is None:
+        dates = list_dates()
+    return is_new_stock(rec.get("code"), dates,
+                        ref_date or datetime.now().strftime("%Y-%m-%d"))
+
+
+def fetch_auction_stocks(top_n=None, stage="live", key=None, keep=None,
+                         ref_date=None):
     """全市场竞价快照，按竞价额降序，可选截断 top_n。
 
     keep：额外保留谓词。竞价涨停但竞价额很小的票经常排在 top_n 之外，
@@ -217,7 +266,8 @@ def fetch_auction_stocks(top_n=None, stage="live", key=None, keep=None):
     过滤：无代码/无名称/竞价额<=0（停牌或未参与竞价）的标的不算入榜。
     """
     key = key or load_key()
-    rows, meta = fetch_auction_rows(stage=stage, key=key)
+    tickers = fetch_tickers(key)
+    rows, meta = fetch_auction_rows(stage=stage, key=key, tickers=tickers)
     stocks = []
     for item in rows:
         rec = to_local_row(item)
@@ -229,13 +279,27 @@ def fetch_auction_stocks(top_n=None, stage="live", key=None, keep=None):
     stocks.sort(key=lambda s: s["auctionAmount"] or 0, reverse=True)
     # 全市场排名（截断前算，否则前排排名失真）：金额名次 + 换手名次
     # 「竞价三一」判据 = 金额前三 且 换手第一（见 reports/竞价三一回测_242日.md）
-    for i, s in enumerate(stocks, 1):
+    # 选票阶段先剔除超大市值（SANYI_CAP_MAX_YI 亿，次新股除外）：大票永远做不到
+    # 换手第一，却会占掉「金额前三」的名额，留在池里等于把真候选挤到第四名。
+    # 242 日回测：剔除 >3000 亿后 t 2.05→2.34、累计 +144%→+182%，且原有命中一笔不丢。
+    ref = ref_date or datetime.now().strftime("%Y-%m-%d")
+    dates = list_dates(tickers)
+    pool = []
+    for s in stocks:
+        if SANYI_CAP_MAX_YI <= 0 or sanyi_eligible(s, ref_date=ref, dates=dates):
+            pool.append(s)
+        else:
+            s["sanyiOut"] = "cap"
+    for i, s in enumerate(pool, 1):
         s["amtRankFull"] = i
     trf_key = lambda s: (s.get("freeTurnover") or s.get("turnover") or 0)
-    for i, s in enumerate(sorted(stocks, key=trf_key, reverse=True), 1):
+    for i, s in enumerate(sorted(pool, key=trf_key, reverse=True), 1):
         s["trfRankFull"] = i
-    for s in stocks:
+    for s in pool:
         s["isSanyi"] = bool(s.get("amtRankFull", 99) <= 3 and s.get("trfRankFull") == 1)
+    meta["sanyiCapMax"] = SANYI_CAP_MAX_YI
+    meta["sanyiPool"] = len(pool)
+    meta["sanyiExcluded"] = len(stocks) - len(pool)
     meta["matched"] = len(stocks)
     meta["kept"] = 0
     if top_n and len(stocks) > top_n:

@@ -152,9 +152,13 @@ const COLS = {
   code:  {label:'代码',           w:66,  align:'left',  render:r=>`<span class="dim">${esc(r.code)}</span>`},
   sanyi: {label:'三一',           w:86,  align:'left',  render:r=>{
     const basis = r.sanyiBasis === 'archive';
-    const tip = basis ? '归档数据没有全市场换手，名次是当日榜单内排名（近似）'
-                      : '全市场排名：金额前三 + 换手第一';
-    if(r.isSanyi) return `<span class="sy" title="${tip}｜金额第${r.amtRankFull}名 · 换手第${r.trfRankFull}名">★ 三一</span>`;
+    const cap = ENV.sanyiCapMax;
+    const capNote = cap>0 ? `｜已剔除流通市值>${cap}亿的票（次新股除外）` : '';
+    const tip = (basis ? '归档数据没有全市场换手，名次是当日榜单内排名（近似）'
+                       : '全市场排名：金额前三 + 换手第一') + capNote;
+    if(r.sanyiOut === 'cap') return `<span class="neu" title="流通市值超过 ${cap} 亿，不参与三一排名">超${cap}亿</span>`;
+    const rankNote = (r.trfRankFull===1 ? '自由流通换手第1' : (r.trfRankFull2===1 ? '流通换手第1' : ''));
+    if(r.isSanyi) return `<span class="sy" title="${tip}｜金额第${r.amtRankFull}名 · ${rankNote||('换手第'+r.trfRankFull+'名')}">★ 三一</span>`;
     if(!r.amtRankFull) return '<span class="neu">—</span>';
     if(r.amtRankFull<=10) return `<span class="dim" title="${tip}">额#${r.amtRankFull} 换#${r.trfRankFull||'—'}</span>`;
     return '<span class="neu">—</span>';
@@ -290,6 +294,8 @@ function mapRow(r){
     amtRankFull: num(r.amtRankFull),
     trfRankFull: num(r.trfRankFull),
     sanyiBasis: r.sanyiBasis || null,
+    trfRankFull2: r.trfRankFull2 == null ? null : r.trfRankFull2,
+    sanyiOut: r.sanyiOut || null,
     // 三时点涨停委买额（悟道 09:20前/后/09:25 或 auction_seal 存档 09:15/09:20/09:25）
     seal0915: num(r.seal0915) || 0,
     seal0920: num(r.seal0920) || 0,
@@ -333,6 +339,7 @@ const NUMSORT = {
 };
 
 let DATA = [];
+let ENV = {};          // 最近一次的 env（三一选票池阈值等），供 COLS 渲染用
 let DATES = [];
 
 /* ==================================================================
@@ -460,6 +467,7 @@ function banner(kind, html){
      上证<MA20   n=17  −0.7%
      昨日涨停≥60/80/100 的 t 值反而递减（2.35 / 1.86 / 1.22）→ 只披露不参与开关 */
 function renderEnv(env){
+  ENV = env || {};
   const box = $('envbar');
   if(!env || !env.ok){
     box.innerHTML = `<div class="env-item"><span class="env-k">环境</span>`
@@ -482,7 +490,9 @@ function renderEnv(env){
     + `<span class="dim">${esc(env.prevLimitUpDate||'')}</span></div>`
     + `<div class="env-item ${on?'on':'off'}" title="${esc(env.sanyiNote||'')}">`
     + `<span class="env-k">三一</span><span class="val">${on?'开':'关'}</span>`
-    + `<span class="dim">本期命中 ${syCount} 只</span></div>`;
+    + `<span class="dim">本期命中 ${syCount} 只</span>`
+    + (env.sanyiCapMax>0 ? `<span class="dim">｜选票池已剔除>${env.sanyiCapMax}亿</span>` : '')
+    + `</div>`;
 }
 
 async function fetchDates(){
