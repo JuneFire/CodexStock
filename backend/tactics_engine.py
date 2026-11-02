@@ -675,7 +675,8 @@ def _six_dim(feats, board, ctx, rules, pressure, zhuang):
 
 
 EXIT_PLAN = {"holdDays": 1, "exitAt": "次日开盘", "backup": "次日收盘",
-             "note": "回测(14日/695样本)：T+1开盘 +1.78% > T+1收盘 +0.96% > T+2 +0.23% > T+3 -0.11%"}
+             "note": "回测(200交易日/15389样本，最优+健康档)：T+1开盘 +2.84% > T+1收盘 +2.31% > T+3 +2.65%；"
+                     "全候选基线 T+1开盘 +1.81% > 收盘 +1.58%"}
 
 
 def _four_gate(ladder, pressure, lianyang, counter, gate6, ctx, rules):

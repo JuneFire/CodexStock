@@ -3836,35 +3836,40 @@ def scan_tactics(date_str):
     for c, pct in zip(out, _cs_percentiles([c.get("rawScore") or 0 for c in out])):
         c["score"] = pct
 
-    # 结论分层（2026-11 回测定标）：阶梯档位定结论，四关只在中低档生效
-    #   可买 = 阶梯最优/次优（即使有硬项否决也只标风险，回测 2.55% vs 1.36% 无差异）
-    #   观察 = 阶梯中性/警戒/健康 且 硬项通过
-    #   回避 = 阶梯中性/警戒/健康 且 硬项否决（回测 0.67%/-0.84%）
+    # 结论分层（2026-11 定标，200 交易日 / 15389 样本回测）
+    #   可买 = 换手率阶梯「最优」或「健康」  → T+1 +2.31%（基线 +1.58），开盘卖 +2.84%，胜率 63.4%
+    #   观察 = 其余未被剔除档（次优/中性/警戒）→ T+1 +1.04~1.39%，无超额
+    #   剔除 = 超标/剔除/高风险 → T+1 +1.32 / -0.01 / -,均低于基线
+    # 四关硬项在 200 日样本里无 alpha（甚至反向：最优档"被否决"2.57% > "通过"1.95%），
+    # 故降级为风险提示，不再参与结论。
+    GOOD_GRADES = ("最优", "健康")
     for c in out:
         grade = c.get("ladderGrade")
         hard_block = c.get("verdict") == "回避"
-        if grade in ("最优", "次优"):
+        if grade in GOOD_GRADES:
             c["verdict"] = "可买"
-            if hard_block:
-                c["verdictNote"] = "有否决项（%s），但阶梯%s，按回测保留" % (
-                    "/".join(c.get("blocked") or []) or "—", grade)
-                # 否决项不能吞掉仓位建议，只降一档提示
-                c["position"] = "五成" if (c.get("sectorZt") or 0) >= 3 else "三成"
-                c["positionTone"] = "warn"
         else:
-            c["verdict"] = "回避" if hard_block else "观察"
+            c["verdict"] = "观察"
+        c["riskNote"] = ("否决项：%s" % "/".join(c.get("blocked") or [])) if hard_block else ""
+        if hard_block:
+            # 否决项不改变结论，只把仓位建议降一档
+            c["position"] = "五成" if (c.get("sectorZt") or 0) >= 3 else "三成"
+            c["positionTone"] = "warn"
         c["heat"] = "过热" if (c.get("score") or 0) >= 80 else ("偏冷" if (c.get("score") or 0) <= 40 else "")
 
-    # 排序：手册四关结论优先（可买 < 观察 < 回避），同档再比得分
-    _rank = {"可买": 0, "观察": 1, "回避": 2}
-    out.sort(key=lambda x: (_rank.get(x.get("verdict"), 3), -(x.get("score") or 0)))
+    # 排序：结论优先，同档按连板数降序（200 日回测：2板 +3.01%、3板 +3.09% 远强于 1 板 +1.87%），再比得分
+    _rank = {"可买": 0, "观察": 1}
+    out.sort(key=lambda x: (_rank.get(x.get("verdict"), 2), -(x.get("lb") or 0), -(x.get("score") or 0)))
     resonant = [c for c in out if (c.get("resonance") or {}).get("resonant")]
     top_n = rules.get("topN", 20)
     # 主列表：三方共振且未被四关否决（回避=不参与，放折叠区）
-    picked = [c for c in resonant if c.get("verdict") != "回避"][:top_n]
+    picked = [c for c in resonant if c.get("verdict") == "可买"][:top_n]
+    if not picked:
+        picked = resonant[:top_n]
     picked_codes = {c["code"] for c in picked}
     folded = [c for c in out if c["code"] not in picked_codes][:top_n]
-    verdict_n = {k: sum(1 for c in out if c.get("verdict") == k) for k in ("可买", "观察", "回避")}
+    verdict_n = {k: sum(1 for c in out if c.get("verdict") == k) for k in ("可买", "观察")}
+    verdict_n["剔除"] = len(excluded)
     day = {"date": date_str, "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
            "scanned": len(cands), "candLbMax": lb_max,
            "resonantN": len(resonant), "otherN": len(out) - len(picked),

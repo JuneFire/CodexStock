@@ -128,10 +128,9 @@
     const vCls = v === '可买' ? 'tag-up' : (v === '回避' ? 'tag-down' : 'tag-warn');
     const blocked = c.blocked || four.blocked || [];
     const manual = four.manualChecks || [];
-    const vTip = c.verdictNote
-      ? c.verdictNote
-      : (blocked.length ? '否决项：' + blocked.join('、')
-        : (manual.length ? '需人工复核：' + manual.join('/') : '硬项全过'));
+    const vTip = c.verdictNote || c.riskNote
+      || (blocked.length ? '风险提示：' + blocked.join('、')
+        : (manual.length ? '需人工复核：' + manual.join('/') : '硬项全过（200日回测中硬项无超额，仅供参考）'));
     const heatTag = c.heat
       ? `<span class="tag ${c.heat === '过热' ? 'tag-down' : 'tag-accent'}" title="池内技术面分位${c.heat === '过热' ? '≥80，回测 T+3 偏负' : '≤40，回测 T+3 偏正'}">${esc(c.heat)}</span>`
       : '';
@@ -140,7 +139,7 @@
          <span class="dim">${esc(c.position || four.position || '')}</span>${heatTag}`
       : '<span class="tag">—</span>';
     const exitCell = c.exitRule
-      ? `<span class="tag tag-accent" title="回测：T+1开盘 +1.78% > T+1收盘 +0.96% > T+3 -0.11%">${esc(c.exitRule)}</span>`
+      ? `<span class="tag tag-accent" title="回测(200交易日/15389样本 最优+健康档)：T+1开盘 +2.84% > T+1收盘 +2.31%，全候选基线 开盘 +1.81% > 收盘 +1.58%">${esc(c.exitRule)}</span>`
       : '<span class="tag">—</span>';
     return `
       <tr>
@@ -176,7 +175,7 @@
     els.tacticsBanner.innerHTML = `
       <span class="env-dot"></span>
       <span class="env-label"><b>市场环境：${esc(mkt.envLabel || mkt.envState || '—')}</b></span>
-      <span class="env-advice">扫描${d.scanned || 0}只首板~${d.candLbMax || 3}板 · 剔除超标${d.excludedN || 0}只 · 三方共振${d.resonantN || 0}只 · 入池${(d.candidates || []).length}只 · 可买${(d.verdictN || {}).可买 || 0}/观察${(d.verdictN || {}).观察 || 0}/回避${(d.verdictN || {}).回避 || 0} · ${esc((d.savedAt || '').slice(11, 16))}</span>`;
+      <span class="env-advice">扫描${d.scanned || 0}只首板~${d.candLbMax || 3}板 · 剔除超标${d.excludedN || 0}只 · 三方共振${d.resonantN || 0}只 · 入池${(d.candidates || []).length}只 · 可买${(d.verdictN || {}).可买 || 0}/观察${(d.verdictN || {}).观察 || 0} · ${esc((d.savedAt || '').slice(11, 16))}</span>`;
 
     const cands = d.candidates || [];
     els.tacticsMeta.textContent = (d.scanned || 0) + ' 只候选 · 三方共振 ' + (d.resonantN || 0) + ' 只 → 前 ' + cands.length;

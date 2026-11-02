@@ -29,6 +29,41 @@ import tactics_engine  # noqa: E402
 KLINE_CACHE = os.path.join(ROOT, "data", "backtest_kline")
 
 ZTPOOL_HIST = os.path.join(ROOT, "data", "market", "ztpool_hist")
+ZTPOOL_BT = os.path.join(ROOT, "data", "market", "ztpool_bt")
+
+
+def pool_rows(date_str):
+    """优先 ztpool_bt（同花顺 200 天），缺失再回落 ztpool_hist（东财 14 天）。"""
+    p = os.path.join(ZTPOOL_BT, date_str + ".json")
+    if os.path.isfile(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f).get("rows") or []
+        except Exception:
+            return []
+    return server._ztpool_rows(date_str)
+
+
+def pool_dates():
+    ds = set()
+    for d in (ZTPOOL_BT, ZTPOOL_HIST):
+        if os.path.isdir(d):
+            for f in os.listdir(d):
+                if f.endswith(".json"):
+                    ds.add(f[:-5])
+    return sorted(ds)
+
+
+def float_cap_yi(kline):
+    """从最后一条K线反算流通市值（亿）：volume 手 ÷ 换手率比例 = 流通股。"""
+    for r in reversed(kline or []):
+        v = _num(r.get("volume"))
+        t = _num(r.get("turnover"))
+        c = _num(r.get("close"))
+        if v and t and c and t > 0:
+            shares = v * 100.0 / t
+            return round(c * shares / 1e8, 2)
+    return None
 
 
 def _num(v):
@@ -141,7 +176,7 @@ def main():
     ap.add_argument("--json", default="")
     args = ap.parse_args()
 
-    dates = sorted(f[:-5] for f in os.listdir(ZTPOOL_HIST) if f.endswith(".json"))
+    dates = pool_dates()
     if args.start:
         dates = [d for d in dates if d >= args.start]
     if args.end:
@@ -155,12 +190,13 @@ def main():
     rows = []
     src_stat = defaultdict(int)
     for d in dates:
-        pool = server._ztpool_rows(d)
+        pool = pool_rows(d)
         cands = [r for r in pool if 1 <= (r.get("lb") or 0) <= lb_max]
         ok = 0
         for r in cands:
             code = r.get("code")
             kline, src = load_kline_local(code, d, r.get("floatCapYi"))
+            pool_cap = r.get("floatCapYi") or float_cap_yi(kline)
             if not kline:
                 continue
             src_stat[src] += 1
@@ -169,8 +205,8 @@ def main():
             feats = tactics_engine.analyze_kline(hist, rules)
             if not feats:
                 continue
-            if r.get("floatCapYi"):
-                feats["floatCapYi"] = r["floatCapYi"]
+            if pool_cap:
+                feats["floatCapYi"] = pool_cap
             lb = int(r.get("lb") or 1)
             strategy = tactics_engine.judge_strategy(
                 feats, lb, tactics_engine.LADDER_RULES,
@@ -202,8 +238,11 @@ def main():
         return 1
     print("\n数据源：%s" % dict(src_stat))
 
-    # 复刻生产逻辑：先按阶梯剔掉超标/高风险，再在当日池内做分位，再二分可买/观察
+    # 复刻生产逻辑（2026-11 定标，200日/15389样本）：
+    #   剔除 = 阶梯超标/剔除/高风险；可买 = 阶梯最优/健康；其余 = 观察
+    #   硬项否决在 200 日样本里无 alpha（甚至反向），不参与结论
     EXCL = ("超标", "剔除", "高风险")
+    GOOD = ("最优", "健康")
     by_day = defaultdict(list)
     for r in rows:
         by_day[r["date"]].append(r)
@@ -211,8 +250,8 @@ def main():
         keep = [r for r in items if r["grade"] not in EXCL]
         pcts = _pct([r.get("raw") or 0 for r in keep])
         for r, p in zip(keep, pcts):
-            r["verdict"] = ("回避" if r.get("verdictHard") == "回避"
-                            else ("可买" if p >= 60 else "观察"))
+            r["pct"] = p
+            r["verdict"] = "可买" if r["grade"] in GOOD else "观察"
         for r in items:
             if r["grade"] in EXCL:
                 r["verdict"] = "剔除"
