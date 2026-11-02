@@ -63,6 +63,21 @@
   .chain{color:#d29922;font-weight:700}
   /* 环境开关：上证 MA20 位置 + 昨日涨停家数（决定三一能不能用） */
   .envbar{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0}
+  /* 竞价三一持仓台账（人工登记） */
+  .posbar{border:1px solid #30363d;border-radius:8px;background:#0d1117;padding:10px 12px;margin:0 0 12px}
+  .pos-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+  .pos-empty{color:#6e7681;font-size:12px;margin-top:8px}
+  .pos-item{margin-top:8px;padding-top:8px;border-top:1px solid #21262d;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;font-size:13px}
+  .pos-name{font-weight:600}
+  .pos-advice{flex:1 1 320px;min-width:240px}
+  .pos-act{display:flex;gap:6px;margin-left:auto}
+  .pos-sell{color:#ff4d4f;font-weight:600}
+  .pos-hold{color:#52c41a;font-weight:600}
+  .pos-warn{color:#d29922;font-weight:600}
+  .btn-xs{font-size:12px;padding:2px 8px;background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;cursor:pointer;font-family:inherit}
+  .btn-xs:hover{background:#30363d;border-color:#8b949e}
+  .btn-buy{font-size:11px;padding:1px 6px;margin-left:4px;background:#1f6feb;border:1px solid #1f6feb;color:#fff;border-radius:3px;cursor:pointer;font-family:inherit}
+  .btn-buy:hover{background:#388bfd}
   .env-item{display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:6px;font-size:13px;background:#161b22;border:1px solid #30363d}
   .env-item.on{border-color:#2ea043;background:#2ea04315}
   .env-item.off{border-color:#da3633;background:#da363315}
@@ -89,6 +104,8 @@
 </div>
 
 <div class="envbar" id="envbar"></div>
+
+<div id="posbar"></div>
 
 <div id="banner"></div>
 
@@ -158,7 +175,12 @@ const COLS = {
                        : '全市场排名：金额前三 + 换手第一') + capNote;
     if(r.sanyiOut === 'cap') return `<span class="neu" title="流通市值超过 ${cap} 亿，不参与三一排名">超${cap}亿</span>`;
     const rankNote = (r.trfRankFull===1 ? '自由流通换手第1' : (r.trfRankFull2===1 ? '流通换手第1' : ''));
-    if(r.isSanyi) return `<span class="sy" title="${tip}｜金额第${r.amtRankFull}名 · ${rankNote||('换手第'+r.trfRankFull+'名')}">★ 三一</span>`;
+    if(r.isSanyi){
+      const btn = (state.date === DATES[0])
+        ? `<button class="btn-buy" data-buy="${r.code}" data-px="${r.openPx||r.price||''}" title="登记买入（价格可后改）">买入</button>`
+        : '';
+      return `<span class="sy" title="${tip}｜金额第${r.amtRankFull}名 · ${rankNote||('换手第'+r.trfRankFull+'名')}">★ 三一</span>${btn}`;
+    }
     if(!r.amtRankFull) return '<span class="neu">—</span>';
     if(r.amtRankFull<=10) return `<span class="dim" title="${tip}">额#${r.amtRankFull} 换#${r.trfRankFull||'—'}</span>`;
     return '<span class="neu">—</span>';
@@ -497,6 +519,99 @@ function renderEnv(env){
     + `</div>`;
 }
 
+/* ==================================================================
+   竞价三一持仓台账（人工登记）
+   ================================================================== */
+let POS = null;
+
+async function fetchSanyi(){
+  try{
+    const r = await fetch(API_BASE + '/api/sanyi', {cache:'no-store'});
+    const d = await r.json();
+    return (d && d.ok) ? d : null;
+  }catch(e){ return null; }
+}
+
+async function sanyiPost(path, body){
+  try{
+    const r = await fetch(API_BASE + path, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body||{})
+    });
+    const d = await r.json();
+    if(!d || !d.ok){ alert('操作失败：' + ((d && d.error) || '未知错误')); return null; }
+    if(d.view) renderPositions(d.view);
+    return d;
+  }catch(e){ alert('操作失败：' + (e.message||e)); return null; }
+}
+
+function posTone(t){ return t==='sell'?'pos-sell':(t==='hold'?'pos-hold':'pos-warn'); }
+
+function renderPositions(p){
+  POS = p || null;
+  const box = $('posbar');
+  if(!box) return;
+  if(!p){
+    box.innerHTML = `<div class="posbar"><div class="pos-head"><span class="env-k">持仓台账</span>`
+      + `<span class="dim">后端 /api/sanyi 不可用</span></div></div>`;
+    return;
+  }
+  const s = p.summary || {};
+  const opens = p.positions || [];
+  const eq = s.equity ? Number(s.equity) : 1;
+  let html = `<div class="posbar"><div class="pos-head">`
+    + `<span class="env-k">持仓台账</span>`
+    + `<span class="val">${opens.length} 只持仓</span>`
+    + (s.closedCount ? `<span class="dim">｜已平 ${s.closedCount} 笔 · 胜率 ${s.winRate==null?'—':s.winRate.toFixed(0)+'%'} · 等权复利 ×${eq.toFixed(2)}</span>` : '')
+    + `<span class="dim">｜${esc(p.rule||'')}</span>`
+    + `<span class="dim">｜${p.closedToday?'今日已收盘':'盘中'} ${esc(p.asOf||'')}</span>`
+    + `</div>`;
+  if(!opens.length){
+    html += `<div class="pos-empty">无持仓 · 出现 ★ 三一时点行内「买入」登记（成交价可改）</div>`;
+  }
+  for(const it of opens){
+    const px = it.buyPx==null?'—':it.buyPx;
+    const ret = it.retPct==null ? '' : ` <span class="${it.retPct>=0?'up':'down'}">${it.retPct>0?'+':''}${it.retPct}%</span>`;
+    html += `<div class="pos-item">`
+      + `<span class="pos-name">${esc(it.name||'')} ${esc(it.code||'')}</span>`
+      + `<span class="dim">买入 ${esc(it.buyDate||'')} @ ${px}${ret}</span>`
+      + `<span class="dim">持 ${it.heldDays} 日 · 昨封 ${it.dLu==null?'—':(it.dLu?'✅':'❌')}`
+      + ` · 今封 ${it.todayLu==null?'—':(it.todayLu?'✅':'❌')}</span>`
+      + `<span class="dim">高开 ${it.gapPct==null?'—':((it.gapPct>0?'+':'')+it.gapPct+'%')}`
+      + (it.amtRank?` · 额#${it.amtRank}`:'') + (it.trfRank?` · 换#${it.trfRank}`:'') + `</span>`
+      + `<span class="pos-advice ${posTone(it.tone)}">${esc(it.advice||'')}</span>`
+      + `<span class="pos-act">`
+      + `<button class="btn-xs" data-sell="${esc(it.code||'')}" data-bd="${esc(it.buyDate||'')}" data-px="${it.curPx==null?'':it.curPx}">登记卖出</button>`
+      + `<button class="btn-xs" data-del="${esc(it.code||'')}" data-bd="${esc(it.buyDate||'')}">删除</button>`
+      + `</span></div>`;
+  }
+  box.innerHTML = html + `</div>`;
+}
+
+document.addEventListener('click', async (e)=>{
+  const b = e.target.closest('[data-buy]');
+  if(b){
+    const code = b.dataset.buy, px = b.dataset.px || '';
+    const v = prompt(`登记买入 ${code}\n买入价（默认竞价价 ${px||'—'}）：`, px);
+    if(v === null) return;
+    await sanyiPost('/api/sanyi/buy', {code, date: state.date, price: v ? Number(v) : undefined});
+    return;
+  }
+  const s = e.target.closest('[data-sell]');
+  if(s){
+    const code = s.dataset.sell, bd = s.dataset.bd, px = s.dataset.px || '';
+    const v = prompt(`登记卖出 ${code}\n卖出价（默认现价 ${px||'—'}）：`, px);
+    if(v === null) return;
+    await sanyiPost('/api/sanyi/sell', {code, buyDate: bd, price: v ? Number(v) : undefined});
+    return;
+  }
+  const d = e.target.closest('[data-del]');
+  if(d){
+    if(!confirm(`从台账删除 ${d.dataset.del}（${d.dataset.bd}）？`)) return;
+    await sanyiPost('/api/sanyi/del', {code: d.dataset.del, buyDate: d.dataset.bd});
+  }
+});
+
 async function fetchDates(){
   try{
     const r = await fetch(API_BASE + '/api/auction_top/dates', {cache:'no-store'});
@@ -613,6 +728,7 @@ function fillDateSelect(){
    ================================================================== */
 (async function boot(){
   renderChips(); renderHead(); renderBody();
+  fetchSanyi().then(renderPositions);
   await fetchDates();
   fillDateSelect();
   if(DATES.length){

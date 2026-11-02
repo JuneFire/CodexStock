@@ -4915,6 +4915,186 @@ def _norm_auction_scores(stocks):
     return stocks
 
 
+# ============================================================ 竞价三一持仓台账（人工登记）
+
+SANYI_BARS_DIR = os.path.join(DATA_DIR, "backtest_kline")   # 与回测同源，覆盖 3409 只
+_SANYI_BARS = {}          # {code: [{date,open,close,high,low}]} 进程内缓存
+_SANYI_BARS_LOCK = threading.Lock()
+_SANYI_LOCK = threading.RLock()      # 台账 load→改→save 串行化（防双击并发）
+
+try:
+    import sanyi_rules as _sanyi
+except ImportError:                     # 以包形式导入（scripts/ 里 import backend.server）
+    try:
+        from backend import sanyi_rules as _sanyi
+    except ImportError:
+        _sanyi = None
+
+
+def _local_bars(code):
+    """读本地日线缓存 data/backtest_kline/<code>.json（升序，只留 OHLC）。"""
+    path = os.path.join(SANYI_BARS_DIR, "%s.json" % str(code).zfill(6))
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            rows = json.load(f) or []
+    except (OSError, ValueError):
+        return []
+    out = []
+    for r in rows:
+        d = str((r or {}).get("date") or "")[:10]
+        c = to_float((r or {}).get("close"))
+        if d and c is not None:
+            out.append({"date": d, "open": to_float(r.get("open")), "close": c,
+                        "high": to_float(r.get("high")), "low": to_float(r.get("low"))})
+    out.sort(key=lambda x: x["date"])
+    return out
+
+
+def _sanyi_bars(code, end_date=None):
+    """日线（本地缓存优先，不足则回落腾讯日K），进程内缓存。"""
+    code = str(code).zfill(6)
+    with _SANYI_BARS_LOCK:
+        bars = _SANYI_BARS.get(code)
+    if bars is None:
+        bars = _local_bars(code)
+        if not bars or (end_date and bars[-1]["date"] < end_date):
+            fetched = _fetch_kline_full(code, "20250101")
+            if fetched:
+                bars = [{"date": str(r.get("date"))[:10], "open": r.get("open"),
+                         "close": r.get("close"), "high": r.get("high"),
+                         "low": r.get("low")} for r in fetched if r.get("date")]
+        if bars:
+            with _SANYI_BARS_LOCK:
+                _SANYI_BARS[code] = bars
+    if end_date:
+        return [r for r in (bars or []) if r["date"] <= end_date]
+    return bars or []
+
+
+def _tx_quotes(codes):
+    """腾讯 qt.gtimg.cn 批量取 {code: {name,last,prevClose,open}}；失败返回已取到的部分。"""
+    codes = [str(c).zfill(6) for c in (codes or []) if c]
+    out = {}
+    for i in range(0, len(codes), 40):
+        chunk = codes[i:i + 40]
+        try:
+            resp = _gtimg_get("https://qt.gtimg.cn/q=" + ",".join(_tx_symbol(c) for c in chunk))
+            text = resp.text or ""
+        except Exception:
+            continue
+        for line in text.split(";"):
+            if "=" not in line:
+                continue
+            fields = line.split("=", 1)[1].strip().strip('"').split("~")
+            if len(fields) < 6:
+                continue
+            code = str(fields[2] or "").strip()[-6:]
+            if len(code) != 6 or not code.isdigit():
+                continue
+            out[code] = {
+                "name": str(fields[TX_NAME_IDX] or "").strip(),
+                "last": to_float(fields[TX_LAST_PRICE_IDX]),
+                "prevClose": to_float(fields[TX_PREV_CLOSE_IDX]),
+                "open": to_float(fields[5]),
+            }
+    return out
+
+
+def _sanyi_view():
+    """竞价三一台账 + 逐笔持仓动作建议（只读，不改台账）。按今日行情实时计算。"""
+    if _sanyi is None:
+        return {"ok": False, "error": "sanyi_rules 未就绪"}
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    closed_now = (now.hour * 60 + now.minute) >= 15 * 60
+    state = _sanyi.load()
+    opens = state.get("open") or []
+    live = _tx_quotes([p.get("code") for p in opens])
+    arch = {}
+    try:
+        for r in (_auction_top_json_day(today) or []):
+            arch[str(r.get("code")).zfill(6)] = r
+    except Exception:
+        arch = {}
+
+    gap_th = _sanyi.GAP_SELL_TH
+    positions = []
+    for pos in opens:
+        code = str(pos.get("code")).zfill(6)
+        name = pos.get("name") or ""
+        buy_date = pos.get("buyDate") or ""
+        q = live.get(code) or {}
+        a = arch.get(code) or {}
+        # 竞价价优先取当日竞价归档（盘后落盘、是真 09:25 值），其次腾讯「今开」，
+        # 最后才用最新价（仅 09:15~09:25 时最新价=匹配价）
+        auction_px = (to_float(a.get("open")) or to_float(a.get("price"))
+                      or q.get("open") or q.get("last"))
+        prev_close = (to_float(a.get("prevClose")) or q.get("prevClose")
+                      or to_float(pos.get("prevClose")))
+        gap = _sanyi.gap_pct(auction_px, prev_close)
+        cur_px = q.get("last") or auction_px
+
+        bars = [b for b in _sanyi_bars(code, today) if b["date"] < today]
+        seq = [b for b in bars if b["date"] >= buy_date]
+        d_lu = None
+        for i, b in enumerate(bars):
+            if b["date"] == buy_date and i > 0:
+                d_lu = _sanyi.is_close_lu(b["close"], bars[i - 1]["close"], code, name)
+        today_lu = None
+        if closed_now and cur_px:
+            base = prev_close or (bars[-1]["close"] if bars else None)
+            if base:
+                today_lu = _sanyi.is_close_lu(cur_px, base, code, name)
+        held_days = len(seq) + (0 if buy_date == today else 1)
+
+        if buy_date == today:
+            if not closed_now:
+                tone, advice = "warn", "买入日 · 等收盘看是否封板"
+            elif d_lu:
+                tone, advice = "hold", "买入日封板 ✅ → 明日 09:25 看高开是否 ≥%g%%" % gap_th
+            else:
+                tone, advice = "sell", "买入日未封板 ❌ → 明日收盘卖出"
+        elif not closed_now:
+            if d_lu and gap is not None and gap >= gap_th:
+                tone = "sell"
+                advice = "竞价卖出 · 昨日封板 + 今日高开 %+.1f%% ≥ %g%%（竞价价 %.2f）" % (gap, gap_th, auction_px or 0)
+            elif d_lu:
+                tone = "hold"
+                advice = "继续持有 · 昨日封板，今日高开 %+.1f%% < %g%%，看今日能否再封板" % (gap or 0, gap_th)
+            else:
+                tone, advice = "sell", "收盘卖出 · 昨日未封板，接力已断"
+        else:
+            if today_lu:
+                tone, advice = "hold", "继续持有 · 今日封板（接力第 %d 日）" % held_days
+            else:
+                tone, advice = "sell", "今日未封板 → 收盘卖出（请在台账登记）"
+
+        buy_px = to_float(pos.get("buyPx"))
+        positions.append({
+            "code": code, "name": name, "buyDate": buy_date, "buyPx": buy_px,
+            "heldDays": held_days, "dLu": d_lu, "todayLu": today_lu,
+            "auctionPx": auction_px, "prevClose": prev_close, "curPx": cur_px,
+            "gapPct": None if gap is None else round(gap, 2),
+            "retPct": None if (not cur_px or not buy_px) else round((cur_px / buy_px - 1) * 100, 2),
+            "tone": tone, "advice": advice,
+            "amtYi": pos.get("amtYi"), "amtRank": pos.get("amtRank"),
+            "trfRank": pos.get("trfRank"), "themes": pos.get("themes"),
+        })
+
+    return {
+        "ok": True,
+        "date": today,
+        "asOf": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "closedToday": closed_now,
+        "rule": _sanyi.RULE_SHORT,
+        "gapSellTh": gap_th,
+        "positions": positions,
+        "summary": _sanyi.summary(state),
+    }
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=FRONTEND_DIR, **kwargs)
@@ -5195,6 +5375,12 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 self.send_json({"ok": True, "date": date, "rows": rows})
             return
+        if parsed.path == "/api/sanyi":
+            try:
+                self.send_json(_sanyi_view())
+            except Exception as exc:
+                self.send_json({"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}, status=502)
+            return
         if parsed.path == "/api/auction_top/dynamic":
             qs = parse_qs(parsed.query)
             date = (qs.get("date") or [""])[0]
@@ -5467,6 +5653,15 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/review_text":
             self._post_review_text()
             return
+        if parsed.path == "/api/sanyi/buy":
+            self._post_sanyi("buy")
+            return
+        if parsed.path == "/api/sanyi/sell":
+            self._post_sanyi("sell")
+            return
+        if parsed.path == "/api/sanyi/del":
+            self._post_sanyi("del")
+            return
         if parsed.path != "/api/review":
             self.send_json({"ok": False, "error": "未知接口"}, status=404)
             return
@@ -5495,6 +5690,95 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True})
         else:
             self.send_json({"ok": False, "error": "保存失败: %s" % db.last_error()}, status=502)
+
+    def _post_sanyi(self, act):
+        """台账人工登记。
+
+        buy  body {date,code,price?,name?,prevClose?,limitPct?}
+        sell body {date,code,buyDate?,price?,why?}
+        del  body {code,buyDate?}
+        """
+        if _sanyi is None:
+            self.send_json({"ok": False, "error": "sanyi_rules 未就绪"}, status=500)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            payload = json.loads(body) if body else {}
+        except Exception as exc:
+            self.send_json({"ok": False, "error": "请求体解析失败: %s" % exc}, status=400)
+            return
+        code = str(payload.get("code") or "").strip().zfill(6)
+        if len(code) != 6 or not code.isdigit():
+            self.send_json({"ok": False, "error": "code 须为 6 位数字"}, status=400)
+            return
+        date = str(payload.get("date") or datetime.now().strftime("%Y-%m-%d"))[:10]
+        with _SANYI_LOCK:
+            self._sanyi_apply(act, payload, code, date)
+
+    def _sanyi_apply(self, act, payload, code, date):
+        """在 _SANYI_LOCK 内执行台账变更，并直接返回最新视图。"""
+        state = _sanyi.load()
+
+        if act == "buy":
+            live = _tx_quotes([code]).get(code) or {}
+            rec = {
+                "code": code,
+                "price": payload.get("price"),
+                "name": payload.get("name") or live.get("name") or "",
+                "prevClose": payload.get("prevClose") or live.get("prevClose"),
+                "limitPct": payload.get("limitPct"),
+            }
+            # 当日竞价归档优先：补三一名次/题材/连板等展示字段
+            try:
+                for r in (_auction_top_json_day(date) or []):
+                    if str(r.get("code")).zfill(6) != code:
+                        continue
+                    for k in ("name", "prevClose", "limitPct", "price", "open", "auctionAmount",
+                              "changePct", "turnover", "floatCap", "amtRankFull", "trfRankFull",
+                              "themes", "prevStreak"):
+                        if rec.get(k) in (None, "") and r.get(k) not in (None, ""):
+                            rec[k] = r.get(k)
+                    break
+            except Exception:
+                pass
+            pos, reason = _sanyi.open_position(state, rec, date, payload.get("price"), {code: live})
+            if not pos:
+                self.send_json({"ok": False, "error": reason}, status=400)
+                return
+            ok, msg = _sanyi.save(state)
+            if not ok:
+                self.send_json({"ok": False, "error": "保存失败: %s" % msg}, status=500)
+                return
+            self.send_json({"ok": True, "reason": reason, "position": pos, "view": _sanyi_view()})
+            return
+
+        if act == "del":
+            if not _sanyi.delete_position(state, code, str(payload.get("buyDate") or "")[:10] or None):
+                self.send_json({"ok": False, "error": "未找到该持仓"}, status=404)
+                return
+            ok, msg = _sanyi.save(state)
+            if not ok:
+                self.send_json({"ok": False, "error": "保存失败: %s" % msg}, status=500)
+                return
+            self.send_json({"ok": True, "view": _sanyi_view()})
+            return
+
+        # sell
+        px = payload.get("price")
+        if not px:
+            live = _tx_quotes([code]).get(code) or {}
+            px = live.get("last") or live.get("open")
+        pos = _sanyi.close_position(state, code, str(payload.get("buyDate") or "")[:10] or None,
+                                    date, px, payload.get("why") or "人工登记卖出", "manual")
+        if not pos:
+            self.send_json({"ok": False, "error": "未找到该持仓（code=%s）" % code}, status=404)
+            return
+        ok, msg = _sanyi.save(state)
+        if not ok:
+            self.send_json({"ok": False, "error": "保存失败: %s" % msg}, status=500)
+            return
+        self.send_json({"ok": True, "position": pos, "view": _sanyi_view()})
 
     def _post_review_text(self):
         """保存某日四层复盘文本。body {date, text}"""

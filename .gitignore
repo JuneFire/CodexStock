@@ -5,3 +5,16 @@ config.json
 
 # 悟道厂商 skill：仅本地使用，不随仓库分发（上游更新时从 stock.quicktiny.cn 重拉）
 .claude/skills/wudao-*/
+
+# 复盘语料库（本地大文件：原始消息/图片/DB，不入库）
+# 复盘语料库：全部数据不入 git（枚举子目录容易漏，直接整目录忽略；迁移用 laiqiu_pack.py 打包）
+data/laiqiu/
+
+# 飞书群语料（原始消息/图片/OCR，本地大文件；含凭证与 token，绝不入库）
+feishu/data/
+
+# 飞书抓取中间产物（lark-cli 原始 JSON，含用户态 token）
+feishu/tmp/
+
+# 竞价三一持仓台账（个人交易记录，绝不入库）
+data/sanyi/
