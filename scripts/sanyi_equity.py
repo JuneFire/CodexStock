@@ -107,20 +107,28 @@ def main():
     print("开关开且有信号 %d 个交易日（同日多只则均分资金）" % len(days_on))
     print()
 
-    for key, label in (("ret_c", "D+1 收盘卖（主）"), ("ret_o", "D+1 开盘卖（备）")):
+    # hold=0 → D 开盘买、D+1 开盘卖：卖出瞬间资金就回罆，当日开盘可立即买新信号，
+    # A 股卖出所得资金当日即可买入，所以没有资金占用。
+    # hold=1 → D+1 收盘才卖：D+1 开盘时资金还在仓里，当天的信号买不了。
+    for key, label, hold in (("ret_o", "D+1 竞价/开盘卖（无占用，可连续做）", 0),
+                             ("ret_c", "D+1 收盘卖（占用 1 天）", 1)):
         print("=" * 78)
         print("【%s】" % label)
         print("=" * 78)
         cap, pts, mdd, rows = curve(hits_on, key)
-        show("A 顺序复利(全仓)", cap, mdd, len(hits_on))
-        cap2, pts2, mdd2, taken, skipped = curve_occupied(hits_on, key, hold_days=1)
-        show("B 持仓占用(真实)", cap2, mdd2, len(taken))
-        print("      被占用跳过 %d 笔：%s" % (len(skipped),
-              "、".join("%s %s" % (t["date"], t["name"]) for t in skipped) or "无"))
+        n = len(hits_on)
+        geo = (cap / START) ** (1.0 / n) - 1
+        show("A 全仓复利", cap, mdd, n)
+        print("      几何均值/笔 %+.2f%%" % (geo * 100))
+        if hold:
+            cap2, _, mdd2, taken, skipd = curve_occupied(hits_on, key, hold_days=hold)
+            show("B 持仓占用(真实)", cap2, mdd2, len(taken))
+            print("      被占用跳过 %d 笔：%s" % (len(skipd),
+                  "、".join("%s %s" % (t["date"], t["name"]) for t in skipd) or "无"))
         cap3, _, mdd3, _ = curve(hits_off, key)
         show("对照：开关关全做", cap3, mdd3, len(hits_off))
         print()
-        print("  --- A 模型逐笔净值 ---")
+        print("  --- 逐笔净值 ---")
         for d, names, before, after in rows:
             print("    %s %-22s %9.2f → %9.2f  (%+.2f%%)"
                   % (d, "/".join(names)[:22], before, after, (after / before - 1) * 100))
