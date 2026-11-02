@@ -227,6 +227,15 @@ def fetch_auction_stocks(top_n=None, stage="live", key=None, keep=None):
             continue
         stocks.append(rec)
     stocks.sort(key=lambda s: s["auctionAmount"] or 0, reverse=True)
+    # 全市场排名（截断前算，否则前排排名失真）：金额名次 + 换手名次
+    # 「竞价三一」判据 = 金额前三 且 换手第一（见 reports/竞价三一回测_242日.md）
+    for i, s in enumerate(stocks, 1):
+        s["amtRankFull"] = i
+    trf_key = lambda s: (s.get("freeTurnover") or s.get("turnover") or 0)
+    for i, s in enumerate(sorted(stocks, key=trf_key, reverse=True), 1):
+        s["trfRankFull"] = i
+    for s in stocks:
+        s["isSanyi"] = bool(s.get("amtRankFull", 99) <= 3 and s.get("trfRankFull") == 1)
     meta["matched"] = len(stocks)
     meta["kept"] = 0
     if top_n and len(stocks) > top_n:

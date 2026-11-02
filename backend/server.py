@@ -5138,6 +5138,7 @@ class Handler(SimpleHTTPRequestHandler):
             if use_cache:
                 self.send_json({"ok": True, "date": date, "rows": cache["rows"],
                                 "cached": True, "inWindow": _in_auction_window(now),
+                                "env": cache.get("env"),
                                 "age": round(time.time() - cache["ts"], 1)})
                 return
             fallback = False
@@ -5206,10 +5207,46 @@ class Handler(SimpleHTTPRequestHandler):
                     r["lbuyStale"] = False
                 if pre is not None or aft is not None:
                     wudaoHit += 1
-            AUCTION_DYN_CACHE.update({"ts": time.time(), "date": date, "rows": rows})
+
+            # 市场环境开关：上证 MA20 位置 + 昨日涨停家数（见 backend/market_env.py）
+            env = {}
+            try:
+                try:
+                    from market_env import env_cached
+                except Exception:
+                    from backend.market_env import env_cached
+                env = env_cached(date) or {}
+            except Exception as exc:
+                env = {"ok": False, "error": str(exc)}
+
+            # 三一标记：金额前三 + 换手第一（全市场排名）。
+            # 同花顺源在抓取时已算好 amtRankFull/trfRankFull；历史悟道归档拿不到
+            # 全市场换手，只能用当日榜单内排名近似，并打 sanyiBasis 说明口径。
+            if not any("amtRankFull" in r for r in rows):
+                amt_ord = sorted(rows, key=lambda x: to_float(x.get("auctionAmount")) or 0,
+                                 reverse=True)
+                trf_ord = sorted(rows, key=lambda x: (to_float(x.get("turnoverRateF"))
+                                                     or to_float(x.get("auctionTurnover"))
+                                                     or to_float(x.get("turnover")) or 0),
+                                 reverse=True)
+                for i, r in enumerate(amt_ord, 1):
+                    r["amtRankFull"] = i
+                for i, r in enumerate(trf_ord, 1):
+                    r["trfRankFull"] = i
+                for r in rows:
+                    r["sanyiBasis"] = "archive"
+            for r in rows:
+                if r.get("sanyiBasis") is None:
+                    r["sanyiBasis"] = "full"
+                r["isSanyi"] = bool(to_float(r.get("amtRankFull")) and
+                                    int(to_float(r.get("amtRankFull"))) <= 3 and
+                                    int(to_float(r.get("trfRankFull")) or 99) == 1)
+
+            AUCTION_DYN_CACHE.update({"ts": time.time(), "date": date, "rows": rows,
+                                      "env": env})
             self.send_json({"ok": True, "date": date, "rows": rows, "fallback": fallback,
                             "cached": False, "inWindow": _in_auction_window(now),
-                            "sealHit": sealHit, "wudaoHit": wudaoHit})
+                            "sealHit": sealHit, "wudaoHit": wudaoHit, "env": env})
             return
         if parsed.path == "/api/auction_top/dates":
             # 两个数据源取并集：MySQL 表 + data/auction_top/*.json 归档。

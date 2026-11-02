@@ -61,6 +61,14 @@
   /* 竞价涨停徽章：金额封单比这类指标只对涨停股成立，得让 人一眼看出谁算 */
   .lu-badge{display:inline-block;margin-left:4px;padding:0 3px;border-radius:3px;background:#c62828;color:#fff;font-size:10px;font-weight:600;line-height:14px;vertical-align:1px}
   .chain{color:#d29922;font-weight:700}
+  /* 环境开关：上证 MA20 位置 + 昨日涨停家数（决定三一能不能用） */
+  .envbar{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0}
+  .env-item{display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:6px;font-size:13px;background:#161b22;border:1px solid #30363d}
+  .env-item.on{border-color:#2ea043;background:#2ea04315}
+  .env-item.off{border-color:#da3633;background:#da363315}
+  .env-k{color:#8b949e;font-size:12px}
+  .env-item .val{font-weight:700}
+  .sy{display:inline-block;padding:1px 6px;border-radius:3px;background:linear-gradient(135deg,#d4a017,#a67c00);color:#fff;font-size:11px;font-weight:700;letter-spacing:.5px}
   .legend{margin:12px 0;font-size:12px;color:#8b949e;padding:10px 14px;background:#161b22;border-radius:6px;line-height:1.9}
   .legend span{margin-right:16px}
   .foot{margin-top:12px;font-size:12px;color:#8b949e;line-height:2;padding:12px 14px;background:#161b22;border-radius:6px}
@@ -79,6 +87,8 @@
   日期 <b id="mDate">—</b> ｜ 抓取 <b id="mFetch">—</b> ｜ 条数 <b id="mCount">—</b> ｜
   数据窗口 <b id="mWin">—</b> ｜ 耗时 <b id="mCost">—</b>
 </div>
+
+<div class="envbar" id="envbar"></div>
 
 <div id="banner"></div>
 
@@ -127,7 +137,7 @@
    配置区
    ================================================================== */
 const API_BASE = '';                       // 与后端同源，留空即可
-const KEY = 'auction_dyn_cols_v1';         // 独立 localStorage key，不与静态页冲突
+const KEY = 'auction_dyn_cols_v2';         // 独立 localStorage key，不与静态页冲突
 const DAY_CACHE = 'auction_dyn_days_v1';   // 已知日期缓存
 
 /* ==================================================================
@@ -140,6 +150,15 @@ const COLS = {
     return r.isLimitUp ? nm + '<span class="lu-badge">停</span>' : nm;
   }},
   code:  {label:'代码',           w:66,  align:'left',  render:r=>`<span class="dim">${esc(r.code)}</span>`},
+  sanyi: {label:'三一',           w:86,  align:'left',  render:r=>{
+    const basis = r.sanyiBasis === 'archive';
+    const tip = basis ? '归档数据没有全市场换手，名次是当日榜单内排名（近似）'
+                      : '全市场排名：金额前三 + 换手第一';
+    if(r.isSanyi) return `<span class="sy" title="${tip}｜金额第${r.amtRankFull}名 · 换手第${r.trfRankFull}名">★ 三一</span>`;
+    if(!r.amtRankFull) return '<span class="neu">—</span>';
+    if(r.amtRankFull<=10) return `<span class="dim" title="${tip}">额#${r.amtRankFull} 换#${r.trfRankFull||'—'}</span>`;
+    return '<span class="neu">—</span>';
+  }},
   openPx:{label:'竞价开盘价',     w:90,  render:r=>r.openPx>0?`<span class="${cls(r.chg)}" style="font-weight:600">${r.openPx.toFixed(2)}</span>`:'<span class="neu">—</span>'},
   ps:    {label:'几天几板',       w:96,  render:r=>{
     if(!r.ps || r.ps<=0) return '<span class="neu">—</span>';
@@ -218,12 +237,12 @@ const COLS = {
   }},
 };
 
-const DEFAULTS = ['idx','name','openPx','ps','seal','amtSealRatio','chg','amt','tr','fmcap','mcap','obp','vr','bs','themes'];
+const DEFAULTS = ['idx','name','sanyi','openPx','ps','seal','amtSealRatio','chg','amt','tr','fmcap','mcap','obp','vr','bs','themes'];
 const DEFAULT_HIDDEN = ['code','obs','trf','plt','sealKeep','amtLbuyRatio','lbuy0915','lbuy0920','lbuy0920t','lbuyDiff1520','lbuyDiff2025','lbuy','avgPx'];
 
 const PRESETS = {
-  A: ['idx','name','chg','obp','obs','lbuy','seal','amtSealRatio','sealKeep','lbuyDiff1520','lbuyDiff2025','ps','plt','bs','vr','themes'],
-  B: ['idx','name','seal','amtSealRatio','amtLbuyRatio','lbuy','sealKeep','lbuy0915','lbuyDiff1520','lbuy0920','lbuyDiff2025','chg','themes','amt','bs','ps','vr','trf','fmcap','openPx','obs','obp'],
+  A: ['idx','name','sanyi','chg','obp','obs','lbuy','seal','amtSealRatio','sealKeep','lbuyDiff1520','lbuyDiff2025','ps','plt','bs','vr','themes'],
+  B: ['idx','name','sanyi','seal','amtSealRatio','amtLbuyRatio','lbuy','sealKeep','lbuy0915','lbuyDiff1520','lbuy0920','lbuyDiff2025','chg','themes','amt','bs','ps','vr','trf','fmcap','openPx','obs','obp'],
 };
 
 /* ==================================================================
@@ -266,6 +285,11 @@ function mapRow(r){
     lbuySource: r.lbuySource,
     isLimitUp: !!r.isLimitUp,          // 竞价是否封住涨停（后端算：openPx vs limitUpPrice）
     sealIsLimitBid: !!r.sealIsLimitBid, // 封单额是否只是“涨停价挂单”而非真封单
+    // 竞价三一（后端算：全市场金额前三 + 换手第一）
+    isSanyi: !!r.isSanyi,
+    amtRankFull: num(r.amtRankFull),
+    trfRankFull: num(r.trfRankFull),
+    sanyiBasis: r.sanyiBasis || null,
     // 三时点涨停委买额（悟道 09:20前/后/09:25 或 auction_seal 存档 09:15/09:20/09:25）
     seal0915: num(r.seal0915) || 0,
     seal0920: num(r.seal0920) || 0,
@@ -430,6 +454,37 @@ function banner(kind, html){
   $('banner').innerHTML = html ? `<div class="msg msg-${kind}">${html}</div>` : '';
 }
 
+/* 环境开关：上证 MA20 位置（决定三一能不能用）+ 昨日涨停家数。
+   回测（242 日 / 46 笔三一，D 日开盘买→次日收盘卖）：
+     上证≥MA20  n=29  +5.41%  胜率 75.9%  t=2.63
+     上证<MA20   n=17  −0.7%
+     昨日涨停≥60/80/100 的 t 值反而递减（2.35 / 1.86 / 1.22）→ 只披露不参与开关 */
+function renderEnv(env){
+  const box = $('envbar');
+  if(!env || !env.ok){
+    box.innerHTML = `<div class="env-item"><span class="env-k">环境</span>`
+      + `<span class="val">—</span><span class="dim">${esc((env&&env.error)||'无数据')}</span></div>`;
+    return;
+  }
+  const on = !!env.aboveMa20;
+  const dev = env.devMa20Pct;
+  const zt = env.prevLimitUp;
+  const ztCls = zt>=80?'up':(zt<50?'down':'');
+  const syCount = DATA.filter(r=>r.isSanyi).length;
+  box.innerHTML =
+    `<div class="env-item ${on?'on':'off'}" title="${esc(env.sanyiNote||'')}">`
+    + `<span class="env-k">环境</span>`
+    + `<span class="val">${esc(env.indexName||'上证')} ${env.close} / MA20 ${env.ma20}`
+    + ` <span class="${on?'up':'down'}">${dev>0?'+':''}${dev}%</span></span>`
+    + `<b class="${on?'up':'down'}">${on?'✅ 站上':'❌ 跌破'}</b></div>`
+    + `<div class="env-item"><span class="env-k">昨日涨停</span>`
+    + `<span class="val ${ztCls}">${zt==null?'—':zt} 只</span>`
+    + `<span class="dim">${esc(env.prevLimitUpDate||'')}</span></div>`
+    + `<div class="env-item ${on?'on':'off'}" title="${esc(env.sanyiNote||'')}">`
+    + `<span class="env-k">三一</span><span class="val">${on?'开':'关'}</span>`
+    + `<span class="dim">本期命中 ${syCount} 只</span></div>`;
+}
+
 async function fetchDates(){
   try{
     const r = await fetch(API_BASE + '/api/auction_top/dates', {cache:'no-store'});
@@ -451,8 +506,7 @@ async function fetchRows(date, force){
 
 async function loadDate(date, force){
   if(!date) return;
-  banner('', '');
-  $('tbody').innerHTML = '<tr><td style="text-align:center;padding:24px;color:#8b949e">加载中…</td></tr>';
+  banner('', '');  $('tbody').innerHTML = '<tr><td style="text-align:center;padding:24px;color:#8b949e">加载中…</td></tr>';
   try{
     const {d, cost} = await fetchRows(date, force);
     DATA = (d.rows || []).map(mapRow);
@@ -473,10 +527,12 @@ async function loadDate(date, force){
     if(warns.length) banner(d.enrichError?'err':'warn', warns.join('　｜　'));
     else banner('ok', '数据正常');
 
+    renderEnv(d.env);
     renderFoot();
     renderChips(); renderHead(); renderBody();
   }catch(e){
     DATA = [];
+    $('envbar').innerHTML = '';
     banner('err', '加载失败：<code>' + esc(e.message||e) + '</code>' +
       '<br>请确认后端已启动，且该日期存在归档（<code>data/auction_top/&lt;date&gt;.json</code>）。');
     $('tbody').innerHTML = '';
@@ -550,8 +606,11 @@ function fillDateSelect(){
   if(DATES.length){
     // 复盘页默认落在最新交易日（DATES[0]）。只有当用户主动选了更早的日期
     // 且该日期仍是最新时，才沿用——否则新的一天数据出来了还停在旧日期上。
-    const target = (state.date && DATES.includes(state.date) && state.date === DATES[0])
-      ? state.date : DATES[0];
+    // URL 带 ?date=YYYY-MM-DD 时优先用它（方便定位某一天）。
+    const want = new URLSearchParams(location.search).get('date');
+    const target = (want && DATES.includes(want)) ? want
+      : ((state.date && DATES.includes(state.date) && state.date === DATES[0])
+         ? state.date : DATES[0]);
     loadDate(target, false);
   }else{
     banner('warn',
