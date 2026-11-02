@@ -3884,9 +3884,9 @@ def scan_tactics(date_str):
         os.makedirs(TACTICS_DIR, exist_ok=True)
         with open(os.path.join(TACTICS_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
             json.dump(day, f, ensure_ascii=False)
-        print("[tactics] %s 扫描 %d 只首板~%d板，剔除超标 %d 只，三方共振 %d 只，入选 %d 只（可买%d/观察%d/回避%d）" % (
+        print("[tactics] %s 扫描 %d 只首板~%d板，剔除超标 %d 只，三方共振 %d 只，入选 %d 只（可买%d/观察%d/剔除%d）" % (
             date_str, len(cands), lb_max, len(excluded), len(resonant), len(picked),
-            verdict_n["可买"], verdict_n["观察"], verdict_n["回避"]), flush=True)
+            verdict_n["可买"], verdict_n["观察"], verdict_n["剔除"]), flush=True)
         return True
     except Exception as exc:
         print("[tactics] %s 落盘失败: %r" % (date_str, exc), flush=True)
