@@ -475,6 +475,7 @@ function renderEnv(env){
     return;
   }
   const on = !!env.aboveMa20;
+  const syOn = 'sanyiOn' in env ? !!env.sanyiOn : on;
   const dev = env.devMa20Pct;
   const zt = env.prevLimitUp;
   const ztCls = zt>=80?'up':(zt<50?'down':'');
@@ -488,10 +489,11 @@ function renderEnv(env){
     + `<div class="env-item"><span class="env-k">昨日涨停</span>`
     + `<span class="val ${ztCls}">${zt==null?'—':zt} 只</span>`
     + `<span class="dim">${esc(env.prevLimitUpDate||'')}</span></div>`
-    + `<div class="env-item ${on?'on':'off'}" title="${esc(env.sanyiNote||'')}">`
-    + `<span class="env-k">三一</span><span class="val">${on?'开':'关'}</span>`
+    + `<div class="env-item ${syOn?'on':'off'}" title="${esc(env.sanyiNote||'')}">`
+    + `<span class="env-k">三一</span><span class="val">${syOn?'开':'关'}</span>`
     + `<span class="dim">本期命中 ${syCount} 只</span>`
     + (env.sanyiCapMax>0 ? `<span class="dim">｜选票池已剔除>${env.sanyiCapMax}亿</span>` : '')
+    + (env.sanyiBearVeto ? `<span class="down">｜空头排列否决</span>` : '')
     + `</div>`;
 }
 

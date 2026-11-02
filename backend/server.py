@@ -152,6 +152,8 @@ SEAL_KEEP_LIMIT_UP = True   # 无论排名，所有「买一价=涨停价」的�
 AUCTION_TOP_N = 50          # 竞价金额抓取前 N 只（腾讯/东财/akshare 统一）
 AUCTION_DYN_TTL = 90        # 竞价动态页增强数据缓存秒数
 AUCTION_DYN_CACHE = {"ts": 0.0, "date": None, "rows": None}
+# 三一推送去重：同一交易日只推一次（进程内存即可，重启后重推无害但也不重复轰炸）
+_SANYI_PUSHED = set()
 AUCTION_TOP_RANK_N = 60     # 竞价榜页面取竞价额前 N（按日期归档）
 AUCTION_USE_HITHINK = True  # 09:25 竞价榜主源用同花顺全市场快照（腾讯在 09:25:0x 常没刷新成交额）
 
@@ -2290,6 +2292,72 @@ def _auction_top_json_day(date_str):
     return records
 
 
+def _push_sanyi(date_str, records):
+    """竞价抓取完成后，如果当日环境允许且命中三一票，推送到飞书。
+
+    三一 = 竞价金额前三 + 竞价换手第一（选票阶段已剔除流通市值 >3000 亿，次新豁免）。
+    开关两道（见 backend/market_env.py）：上证距 MA20 >= -1%，且非均线空头排列。
+    242 日/56 笔回测：开关后 41 笔均值 +4.61%、胜率 70.7%。
+    同一天只推一次（重试重跑不重复轰炸）。
+    """
+    hits = [r for r in (records or []) if r.get("isSanyi")]
+    if not hits:
+        print("[sanyi] 无三一票，跳过推送", flush=True)
+        return False
+    if date_str in _SANYI_PUSHED:
+        print("[sanyi] %s 已推送过，跳过" % date_str, flush=True)
+        return False
+    env = {}
+    try:
+        try:
+            from market_env import env_cached
+        except Exception:
+            from backend.market_env import env_cached
+        env = env_cached(date_str) or {}
+    except Exception as exc:
+        print("[sanyi] 环境读取失败: %r" % (exc,), flush=True)
+    if env.get("ok") and not env.get("sanyiOn"):
+        print("[sanyi] 命中 %d 只但环境开关关（%s），不推送: %s" % (
+            len(hits), env.get("sanyiNote"),
+            "、".join(str(r.get("name")) for r in hits)), flush=True)
+        return False
+
+    title = "竞价三一 %s（%d 只）" % (date_str, len(hits))
+    els = [{"tag": "markdown", "content": "**环境** 上证 %s / MA20 %s（%+.2f%%）· 昨日涨停 %s 只" % (
+        env.get("close", "—"), env.get("ma20", "—"), env.get("devMa20Pct") or 0,
+        env.get("prevLimitUp", "—"))}, {"tag": "hr"}]
+    lines = ["# %s 竞价三一 %d 只" % (date_str, len(hits))]
+    for r in hits:
+        detail = ("竞价额 %.2f 亿 · 金额第 %s 名 · 换手第 %s 名（%.2f%%）· 竞价涨幅 %+.2f%% · "
+                  "流通市值 %.0f 亿") % (
+            (r.get("auctionAmount") or 0) / 1e8, r.get("amtRankFull"),
+            r.get("trfRankFull"), r.get("turnover") or 0, r.get("changePct") or 0,
+            (r.get("floatCap") or 0) / 1e8)
+        extra = []
+        if r.get("prevStreak"):
+            extra.append("昨日 %s 板" % r.get("prevStreak"))
+        th = r.get("themes")
+        if th:
+            extra.append("、".join(th[:3]) if isinstance(th, list) else str(th))
+        if r.get("sealAmount"):
+            extra.append("封单 %.2f 亿" % (r["sealAmount"] / 1e8))
+        if extra:
+            detail += "\n" + " · ".join(extra)
+        els.append({"tag": "markdown", "content": "**%s %s**  ★三一\n%s" % (
+            r.get("code"), r.get("name"), detail)})
+        lines.append("### %s %s ★三一" % (r.get("code"), r.get("name")))
+        lines.append(detail)
+    els.append({"tag": "hr"})
+    els.append({"tag": "note", "elements": [{"tag": "plain_text", "content":
+        "今日开盘买 · 次日收盘卖（242 日回测：次日收盘 +3.24%，次日开盘仅 +1.32%）。"
+        "仅供选股参考，非投资建议。"}]})
+    ok = _send_feishu(title, els)
+    _send_serverchan(title, "\n\n".join(lines))
+    if ok:
+        _SANYI_PUSHED.add(date_str)
+    return ok
+
+
 def _run_auction_top_sample():
     try:
         snap = fetch_auction_top()
@@ -2324,6 +2392,11 @@ def _run_auction_top_sample():
         # 文件归档是权威降级源；同时写 MySQL，数据库不可用只记日志不影响页面
         if not db.save_auction_top(snap["records"]):
             print("[auction-top] MySQL 入库失败: %s" % db.last_error(), flush=True)
+        # 三一命中则推送飞书（环境开关不满足时只记日志，不打扰）
+        try:
+            _push_sanyi(snap["date"], snap["records"])
+        except Exception as exc:
+            print("[sanyi] 推送异常: %r" % (exc,), flush=True)
     except Exception as exc:
         print("[auction-top] 抓取失败: %r" % exc, flush=True)
 
@@ -5338,6 +5411,11 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json({"ok": False, "error": msg}, status=502)
                     return
                 db.save_auction_top(snap["records"])  # MySQL 失败只记日志，文件归档已兜底
+                # 手动重抓也走三一推送（同一天去重，不会重复轰炸）
+                try:
+                    _push_sanyi(snap["date"], snap["records"])
+                except Exception as exc:
+                    print("[sanyi] 推送异常: %r" % (exc,), flush=True)
                 self.send_json({"ok": True, "date": snap["date"], "count": len(snap["records"])})
             except Exception as exc:
                 self.send_json({"ok": False, "error": "抓取失败: %s" % exc}, status=502)

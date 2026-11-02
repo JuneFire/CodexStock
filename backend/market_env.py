@@ -30,6 +30,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX_DIR = os.path.join(ROOT, "data", "index_kline")
 ZTPOOL_DIR = os.path.join(ROOT, "data", "market", "ztpool_bt")
 INDEX_NAME = "sh000001"
+# 三一开关阈值：上证收盘距 MA20 不低于该百分比（-1.0 = 允许小幅跌破 1%）。
+# 依据 scripts/analyze_sanyi_ma.py（242 日 / 56 笔）：距 MA20 ≥ -1% 41 笔 +4.61% 胜率 70.7%，
+# < -1% 15 笔 -0.49% 胜率 46.7%（开盘卖胜率仅 33.3%）。
+SANYI_DEV_MIN = -1.0
 INDEX_LABEL = "上证指数"
 EM_IDX_URL = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
               "?secid=1.000001&fields1=f1,f2,f3,f4,f5,f6"
@@ -207,10 +211,29 @@ def env(date_str=None, allow_fetch=True):
         return {"ok": False, "error": "上证指数日K不足", "date": date_str}
 
     close = bars[prev_i]["close"]
+    ma5 = _ma(bars, prev_i, 5)
+    ma10 = _ma(bars, prev_i, 10)
     ma20 = _ma(bars, prev_i, 20)
     ma60 = _ma(bars, prev_i, 60)
     ma20_prev5 = _ma(bars, prev_i - 5, 20) if prev_i >= 5 else None
     above20 = bool(ma20 and close > ma20)
+    dev20 = round((close / ma20 - 1) * 100, 2) if ma20 else None
+    # 均线空头排列 MA5 < MA10 < MA20：下跌刚开始，三一一票否决
+    # （242 日/56 笔回测：该形态 14 笔 次收 -1.44%、次开 -2.21%、开盘胜率仅 28.6%）
+    bear_stack = bool(ma5 and ma10 and ma20 and ma5 < ma10 < ma20)
+    bull_stack = bool(ma5 and ma10 and ma20 and ma5 > ma10 > ma20)
+    # 三一开关：距 MA20 不低于 -1%（不是「站上 MA20」）
+    # 242 日/56 笔回测：距 MA20 >= -1% 41 笔 +4.61%（胜率 70.7%）vs < -1% 15 笔 -0.49%，
+    # 且累计 +188.9% > 全部 56 笔的 +181.6%；单看「站上 MA20」只有 33 笔 +5.31%，
+    # 白白丢掉「小跌破」那一批的 +13.8%。MA5/MA10 单独看无区分度（差 0.9pp，t<2.2）。
+    on = bool(dev20 is not None and dev20 >= SANYI_DEV_MIN and not bear_stack)
+    if bear_stack:
+        note = "上证均线空头排列（MA5<MA10<MA20），三一一票否决（回测 14 笔次收 -1.44%）"
+    elif dev20 is not None and dev20 < SANYI_DEV_MIN:
+        note = "上证距 MA20 %.2f%%，跌破超过 %.0f%%，三一停用（回测 15 笔均值 -0.49%%）" % (
+            dev20, abs(SANYI_DEV_MIN))
+    else:
+        note = "上证距 MA20 %+.2f%%，三一可用" % (dev20 or 0)
     zt = limit_up_count(prev, allow_fetch=allow_fetch)
     return {
         "ok": True,
@@ -219,18 +242,22 @@ def env(date_str=None, allow_fetch=True):
         "index": INDEX_NAME,
         "indexName": INDEX_LABEL,
         "close": round(close, 2),
+        "ma5": round(ma5, 2) if ma5 else None,
+        "ma10": round(ma10, 2) if ma10 else None,
         "ma20": round(ma20, 2) if ma20 else None,
         "ma60": round(ma60, 2) if ma60 else None,
         "aboveMa20": above20,
         "aboveMa60": bool(ma60 and close > ma60),
-        "devMa20Pct": round((close / ma20 - 1) * 100, 2) if ma20 else None,
+        "devMa20Pct": dev20,
         "ma20Slope5Pct": round((ma20 / ma20_prev5 - 1) * 100, 2) if ma20 and ma20_prev5 else None,
+        "bearStack": bear_stack,
+        "bullStack": bull_stack,
         "prevLimitUp": zt,
         "prevLimitUpDate": prev,
-        # 三一开关：只有上证在 MA20 上方才点亮
-        "sanyiOn": above20,
-        "sanyiNote": ("上证在 MA20 上方，三一可用" if above20
-                      else "上证已跌破 MA20，三一停用（回测该环境下 17 笔均值 -0.7%）"),
+        "sanyiOn": on,
+        "sanyiDevMin": SANYI_DEV_MIN,
+        "sanyiBearVeto": bear_stack,
+        "sanyiNote": note,
     }
 
 
