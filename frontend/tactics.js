@@ -123,9 +123,9 @@
       : '<span class="tag">—</span>';
     const shrinkTag = lad.shrink
       ? '<span class="tag tag-accent" title="当日换手低于前一日（手册：三板缩量优先）">缩量</span>' : '';
-    // 手册·四关结论 + 仓位（结论由后端按阶梯档位分层给出：可买/观察/回避）
+    // 手册·四关结论 + 仓位（结论由后端按阶梯档位分层给出：候选/观察）
     const v = c.verdict || four.verdict || '';
-    const vCls = v === '可买' ? 'tag-up' : (v === '回避' ? 'tag-down' : 'tag-warn');
+    const vCls = v === '候选' ? 'tag-up' : (v === '回避' ? 'tag-down' : 'tag-warn');
     const blocked = c.blocked || four.blocked || [];
     const manual = four.manualChecks || [];
     const vTip = c.verdictNote || c.riskNote
@@ -139,7 +139,7 @@
          <span class="dim">${esc(c.position || four.position || '')}</span>${heatTag}`
       : '<span class="tag">—</span>';
     const exitCell = c.exitRule
-      ? `<span class="tag tag-accent" title="回测(200交易日/15389样本 最优+健康档)：T+1开盘 +2.84% > T+1收盘 +2.31%，全候选基线 开盘 +1.81% > 收盘 +1.58%">${esc(c.exitRule)}</span>`
+      ? `<span class="tag tag-accent" title="路线2：盘后复盘选股 → 次日开盘买入 → 最早 D+2 卖出（A股 T+1）。200交易日/15337样本实测 D+2收盘 -0.07%、D+2开盘 -0.30%，无统计 alpha。有 alpha 的是打板口径：D 日涨停价成交 → D+1 开盘卖 +1.37%（换手板）/+2.31%（早板）。">${esc(c.exitRule)}</span>`
       : '<span class="tag">—</span>';
     return `
       <tr>
@@ -175,7 +175,7 @@
     els.tacticsBanner.innerHTML = `
       <span class="env-dot"></span>
       <span class="env-label"><b>市场环境：${esc(mkt.envLabel || mkt.envState || '—')}</b></span>
-      <span class="env-advice">扫描${d.scanned || 0}只首板~${d.candLbMax || 3}板 · 剔除超标${d.excludedN || 0}只 · 三方共振${d.resonantN || 0}只 · 入池${(d.candidates || []).length}只 · 可买${(d.verdictN || {}).可买 || 0}/观察${(d.verdictN || {}).观察 || 0} · ${esc((d.savedAt || '').slice(11, 16))}</span>`;
+      <span class="env-advice">扫描${d.scanned || 0}只首板~${d.candLbMax || 3}板 · 剔除超标${d.excludedN || 0}只 · 三方共振${d.resonantN || 0}只 · 入池${(d.candidates || []).length}只 · 候选${(d.verdictN || {}).候选 || 0}/观察${(d.verdictN || {}).观察 || 0} · ${esc((d.savedAt || '').slice(11, 16))}${d.expect != null ? '　·　<b>T+1期望 ' + (d.expect > 0 ? '+' : '') + d.expect + '%</b>（隔日开盘买→D+2收盘卖，无alpha，仅观察）' : ''}</span>`;
 
     const cands = d.candidates || [];
     els.tacticsMeta.textContent = (d.scanned || 0) + ' 只候选 · 三方共振 ' + (d.resonantN || 0) + ' 只 → 前 ' + cands.length;

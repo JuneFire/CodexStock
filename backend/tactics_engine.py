@@ -674,9 +674,18 @@ def _six_dim(feats, board, ctx, rules, pressure, zhuang):
     return items
 
 
-EXIT_PLAN = {"holdDays": 1, "exitAt": "次日开盘", "backup": "次日收盘",
-             "note": "回测(200交易日/15389样本，最优+健康档)：T+1开盘 +2.84% > T+1收盘 +2.31% > T+3 +2.65%；"
-                     "全候选基线 T+1开盘 +1.81% > 收盘 +1.58%"}
+# A 股 T+1：当日买入当日不能卖。路线2 = 盘后复盘选股 → 次日开盘买入 → 最早 D+2 卖出。
+# 200 交易日元/15,337 样本实测：买次开卖 D+2 收盘 -0.07%、卖 D+2 开盘 -0.30%，胜率 46.7%，无统计 alpha。
+# （旧的「T+1 开盘卖 +2.84%」是「D 日涨停价买入」口径的打板收益，隔日开盘买入者吃不到。）
+EXIT_PLAN = {"route": "路线2·盘后复盘",
+             "buyAt": "次日开盘",
+             "holdDays": 2,
+             "exitAt": "D+2收盘",
+             "backup": "D+2开盘",
+             "expect": -0.07,
+             "expectNote": "200交易日/15337样本 T+1合规期望 -0.07%（D+2开盘卖 -0.30%），无统计alpha，仅作观察池",
+             "note": "隔日开盘买入 → 最早 D+2 才能卖出（T+1）；若能在 D 日涨停价成交（打板），"
+                     "退化为 D+1 开盘卖 +1.37%（换手板）/+2.31%（早板），那才是真正有 alpha 的路径。"}
 
 
 def _four_gate(ladder, pressure, lianyang, counter, gate6, ctx, rules):
@@ -686,7 +695,7 @@ def _four_gate(ladder, pressure, lianyang, counter, gate6, ctx, rules):
     （+1.03% vs +0.95%），这三项没有独立 alpha。现改为：
       硬否决：阶梯超标 / 压力位不通过 / 连阳≥空仓线 / 板块连跌≥3天 / 六维盘子否决
       软项加权：阶梯档位、连阳 4~7、逆势 1~2 天、庄股形态 → scoreAdjust
-    verdict 在这里只给「通过/回避」，可买/观察由调用方按池内分位切。
+    verdict 在这里只给「通过/回避」，候选/观察由调用方按阶梯档位切。
     """
     adj, notes, blocked = 0, [], []
     ly = rules["lianyang"]

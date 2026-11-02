@@ -105,10 +105,9 @@ def forward_returns(kline, date_str, horizons=(1, 2, 3)):
             c = _num(kline[j].get("close"))
             if c:
                 out["t%d" % h] = round((c / base - 1) * 100, 2)
-        if h == 1:
-            o = _num(kline[j].get("open")) if j < len(kline) else None
+            o = _num(kline[j].get("open"))
             if o:
-                out["t1open"] = round((o / base - 1) * 100, 2)
+                out["t%dopen" % h] = round((o / base - 1) * 100, 2)
     # T+1 涨停判定：涨幅 ≥ 9.8%（20cm 板另算）
     j = idx + 1
     if j < len(kline):
@@ -163,6 +162,28 @@ def summarize(rows, key):
             "t1open": avg([i.get("t1open") for i in items]),
             "t1up": round(sum(i.get("t1_limitup") or 0 for i in items) / len(items) * 100, 1),
             "win": round(sum(1 for i in items if (i.get("t1") or 0) > 0) / len(items) * 100, 1),
+        })
+    return sorted(out, key=lambda x: -x["n"])
+
+
+def summarize_exec(rows, key):
+    """可执行口径分组统计（次日开盘买入，09:25 竞价涨幅可见后决定）。"""
+    groups = defaultdict(list)
+    for r in rows:
+        if r.get("b1c") is None:
+            continue
+        groups[r.get(key) or "—"].append(r)
+    out = []
+    for g, items in groups.items():
+        if len(items) < 20:
+            continue
+        out.append({
+            "group": str(g), "n": len(items),
+            "b1o": avg([i.get("b1o") for i in items]),
+            "b1c": avg([i.get("b1c") for i in items]),
+            "b2o": avg([i.get("b2o") for i in items]),
+            "gap": avg([i.get("gap") for i in items]),
+            "b1cwin": round(sum(1 for i in items if (i.get("b1c") or 0) > 0) / len(items) * 100, 1),
         })
     return sorted(out, key=lambda x: -x["n"])
 
@@ -256,6 +277,33 @@ def main():
             if r["grade"] in EXCL:
                 r["verdict"] = "剔除"
 
+    # ---- 可执行口径：隔日开盘买入（晚上复盘选股 → 次日 09:25 看竞价 → 09:30 开盘成交）----
+    #   ex1  = 次日开盘买 → 当日收盘卖
+    #   ex1o = 次日开盘买 → 再次日开盘卖
+    #   ex2  = 次日开盘买 → 再次日收盘卖
+    for r in rows:
+        o = r.get("t1open")
+        if o is None:
+            continue
+        f = 1 + o / 100.0
+        # 路径 B（D+1 开盘买入）：最早 D+2 才能卖，T+1 合规
+        for tag, key in (("b1o", "t2open"), ("b1c", "t2"), ("b2o", "t3open"), ("b2c", "t3")):
+            v = r.get(key)
+            if v is not None:
+                r[tag] = round(((1 + v / 100.0) / f - 1) * 100, 2)
+        r["gap"] = o                      # 竞价/开盘涨幅（09:25 可见）
+        r["gapBand"] = ("低开<=-2" if o <= -2 else "低开-2~0" if o < 0 else
+                        "平开0~2" if o < 2 else "高开2~5" if o < 5 else "高开>=5")
+
+    def _ex_summary(key, title):
+        print("")
+        print("--- 路径B: D+1开盘买(最早D+2卖, T+1合规) 按%s ---" % title)
+        print("  %-10s %4s %11s %11s %11s %9s %7s" % (
+            "分组", "样本", "D+2开盘卖", "D+2收盘卖", "D+3开盘卖", "隔夜跳空", "胜率"))
+        for g in summarize_exec(rows, key):
+            print("  %-10s %4d %11s %11s %11s %9s %6s%%" % (
+                g["group"], g["n"], g["b1o"], g["b1c"], g["b2o"], g["gap"], g["b1cwin"]))
+
     print("\n=== 基线：全部候选（%d 条）===" % len(rows))
     print("  T+1 %.2f%%  T+2 %.2f%%  T+3 %.2f%%  T+1开盘 %.2f%%  胜率 %.1f%%  T+1涨停 %.1f%%" % (
         avg([r.get("t1") for r in rows]) or 0, avg([r.get("t2") for r in rows]) or 0,
@@ -270,6 +318,11 @@ def main():
         for g in summarize(rows, key):
             print("  %-8s %4d %8s %8s %8s %9s %6s%% %6s%%" % (
                 g["group"], g["n"], g["t1"], g["t2"], g["t3"], g["t1open"], g["win"], g["t1up"]))
+
+    _ex_summary("gapBand", "竞价(开盘)涨幅档")
+    _ex_summary("verdict", "结论")
+    _ex_summary("grade", "换手率阶梯")
+    _ex_summary("lb", "连板数")
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:

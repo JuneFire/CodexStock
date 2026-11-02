@@ -3836,10 +3836,13 @@ def scan_tactics(date_str):
     for c, pct in zip(out, _cs_percentiles([c.get("rawScore") or 0 for c in out])):
         c["score"] = pct
 
-    # 结论分层（2026-11 定标，200 交易日 / 15389 样本回测）
-    #   可买 = 换手率阶梯「最优」或「健康」  → T+1 +2.31%（基线 +1.58），开盘卖 +2.84%，胜率 63.4%
-    #   观察 = 其余未被剔除档（次优/中性/警戒）→ T+1 +1.04~1.39%，无超额
-    #   剔除 = 超标/剔除/高风险 → T+1 +1.32 / -0.01 / -,均低于基线
+    # 结论分层（2026-11 定标，200 交易日 / 15,337 样本回测，全部 T+1 合规）
+    # 口径：隔日开盘买入（盘后复盘）→ 最早 D+2 卖出。
+    #   候选 = 换手率阶梯「最优」或「健康」→ D+2收盘 -0.07%(期望≈0)，无 alpha
+    #   观察 = 其余未被剔除档（次优/中性/警戒）→ D+2收盘 -0.01~+0.4%，同样无 alpha
+    #   剔除 = 超标/剔除/高风险 → 高风险档 -0.05%、超标 +0.03%
+    # 结论：路线2（盘后复盘+隔日开盘买）在 T+1 下没有统计 alpha，页面只当观察池用。
+    # 有 alpha 的是打板口径（D 日涨停价成交 → D+1 开盘卖 +1.37%~+2.31%），但需盘中实时换手率外推。
     # 四关硬项在 200 日样本里无 alpha（甚至反向：最优档"被否决"2.57% > "通过"1.95%），
     # 故降级为风险提示，不再参与结论。
     GOOD_GRADES = ("最优", "健康")
@@ -3847,7 +3850,7 @@ def scan_tactics(date_str):
         grade = c.get("ladderGrade")
         hard_block = c.get("verdict") == "回避"
         if grade in GOOD_GRADES:
-            c["verdict"] = "可买"
+            c["verdict"] = "候选"
         else:
             c["verdict"] = "观察"
         c["riskNote"] = ("否决项：%s" % "/".join(c.get("blocked") or [])) if hard_block else ""
@@ -3857,19 +3860,20 @@ def scan_tactics(date_str):
             c["positionTone"] = "warn"
         c["heat"] = "过热" if (c.get("score") or 0) >= 80 else ("偏冷" if (c.get("score") or 0) <= 40 else "")
 
-    # 排序：结论优先，同档按连板数降序（200 日回测：2板 +3.01%、3板 +3.09% 远强于 1 板 +1.87%），再比得分
-    _rank = {"可买": 0, "观察": 1}
+    # 排序：结论优先，同档按连板数降序（200 日回测 D+2 收盘口径：2板 +0.23%、3板 -0.17%，仅作排序参考），再比得分
+    _rank = {"候选": 0, "观察": 1}
     out.sort(key=lambda x: (_rank.get(x.get("verdict"), 2), -(x.get("lb") or 0), -(x.get("score") or 0)))
     resonant = [c for c in out if (c.get("resonance") or {}).get("resonant")]
     top_n = rules.get("topN", 20)
-    # 主列表：三方共振且未被四关否决（回避=不参与，放折叠区）
-    picked = [c for c in resonant if c.get("verdict") == "可买"][:top_n]
+    # 主列表：三方共振 + 阶梯最优/健康（仍只是观察池，T+1 下无 alpha）
+    picked = [c for c in resonant if c.get("verdict") == "候选"][:top_n]
     if not picked:
         picked = resonant[:top_n]
     picked_codes = {c["code"] for c in picked}
     folded = [c for c in out if c["code"] not in picked_codes][:top_n]
-    verdict_n = {k: sum(1 for c in out if c.get("verdict") == k) for k in ("可买", "观察")}
+    verdict_n = {k: sum(1 for c in out if c.get("verdict") == k) for k in ("候选", "观察")}
     verdict_n["剔除"] = len(excluded)
+    _plan = tactics_engine.EXIT_PLAN
     day = {"date": date_str, "savedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
            "scanned": len(cands), "candLbMax": lb_max,
            "resonantN": len(resonant), "otherN": len(out) - len(picked),
@@ -3878,15 +3882,19 @@ def scan_tactics(date_str):
            "excluded": [{"code": c["code"], "name": c["name"], "lb": c.get("lb"),
                          "ladderGrade": c.get("ladderGrade"), "latestTurnover": c.get("latestTurnover")}
                         for c in excluded],
-           "exitRule": tactics_engine.EXIT_PLAN.get("exitAt"),
+           "route": _plan.get("route"),
+           "exitRule": _plan.get("exitAt"),
+           "buyAt": _plan.get("buyAt"),
+           "expect": _plan.get("expect"),
+           "expectNote": _plan.get("expectNote"),
            "market": market_ctx, "candidates": picked, "others": folded}
     try:
         os.makedirs(TACTICS_DIR, exist_ok=True)
         with open(os.path.join(TACTICS_DIR, date_str + ".json"), "w", encoding="utf-8") as f:
             json.dump(day, f, ensure_ascii=False)
-        print("[tactics] %s 扫描 %d 只首板~%d板，剔除超标 %d 只，三方共振 %d 只，入选 %d 只（可买%d/观察%d/剔除%d）" % (
+        print("[tactics] %s 扫描 %d 只首板~%d板，剔除超标 %d 只，三方共振 %d 只，入选 %d 只（候选%d/观察%d/剔除%d）T+1期望 %+.2f%%" % (
             date_str, len(cands), lb_max, len(excluded), len(resonant), len(picked),
-            verdict_n["可买"], verdict_n["观察"], verdict_n["剔除"]), flush=True)
+            verdict_n["候选"], verdict_n["观察"], verdict_n["剔除"], _plan.get("expect") or 0), flush=True)
         return True
     except Exception as exc:
         print("[tactics] %s 落盘失败: %r" % (date_str, exc), flush=True)
