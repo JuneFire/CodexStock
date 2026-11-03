@@ -84,6 +84,22 @@
   .env-k{color:#8b949e;font-size:12px}
   .env-item .val{font-weight:700}
   .sy{display:inline-block;padding:1px 6px;border-radius:3px;background:linear-gradient(135deg,#d4a017,#a67c00);color:#fff;font-size:11px;font-weight:700;letter-spacing:.5px}
+  /* S5 强信号：三一 + 环境 + 题材 三重共振，一年只出现 20 次左右 */
+  .sy5{display:inline-block;padding:2px 7px;border-radius:3px;background:linear-gradient(135deg,#ff3b30,#c00a0a);color:#fff;font-size:12px;font-weight:900;letter-spacing:.5px;box-shadow:0 0 6px rgba(255,59,48,.6)}
+  #s5bar:empty{display:none}
+  .s5bar{margin:14px 0;padding:16px 20px;border-radius:10px;border:2px solid #ff3b30;background:linear-gradient(135deg,rgba(255,59,48,.16),rgba(192,10,10,.10));animation:s5pulse 1.6s ease-in-out infinite}
+  @keyframes s5pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,59,48,.45)}50%{box-shadow:0 0 0 10px rgba(255,59,48,0)}}
+  .s5-title{font-size:26px;font-weight:900;color:#ff3b30;letter-spacing:1px;line-height:1.3}
+  .s5-sub{margin-top:6px;font-size:15px;color:#ff6b60;font-weight:700}
+  .s5-sub b{color:#ff3b30;font-size:20px;font-weight:900;padding:0 2px}
+  .s5-list{margin-top:12px;display:flex;flex-direction:column;gap:7px}
+  .s5-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;padding:8px 12px;border-radius:6px;background:rgba(255,59,48,.10);border-left:3px solid #ff3b30}
+  .s5-row .n{font-size:17px;font-weight:900;color:#ff3b30}
+  .s5-row .c{font-family:var(--mono,monospace);font-size:12px;color:var(--text-2)}
+  .s5-row .t{font-size:13px;font-weight:700;color:#ffb84d}
+  .s5-row .k{font-size:12px;color:var(--text-2)}
+  .s5-note{margin-top:12px;padding-top:10px;border-top:1px dashed rgba(255,59,48,.35);font-size:12px;color:var(--text-2);line-height:1.7}
+  .s5-note b{color:#ff6b60}
   .legend{margin:12px 0;font-size:12px;color:#8b949e;padding:10px 14px;background:#161b22;border-radius:6px;line-height:1.9}
   .legend span{margin-right:16px}
   .foot{margin-top:12px;font-size:12px;color:#8b949e;line-height:2;padding:12px 14px;background:#161b22;border-radius:6px}
@@ -104,6 +120,8 @@
 </div>
 
 <div class="envbar" id="envbar"></div>
+
+<div id="s5bar"></div>
 
 <div id="posbar"></div>
 
@@ -154,7 +172,7 @@
    配置区
    ================================================================== */
 const API_BASE = '';                       // 与后端同源，留空即可
-const KEY = 'auction_dyn_cols_v3';         // 独立 localStorage key，不与静态页冲突（v3：新增收盘涨幅/收盘价列）
+const KEY = 'auction_dyn_cols_v2';         // 独立 localStorage key，不与静态页冲突
 const DAY_CACHE = 'auction_dyn_days_v1';   // 已知日期缓存
 
 /* ==================================================================
@@ -179,6 +197,10 @@ const COLS = {
       const btn = (state.date === DATES[0])
         ? `<button class="btn-buy" data-buy="${r.code}" data-px="${r.openPx||r.price||''}" title="登记买入（价格可后改）">买入</button>`
         : '';
+      if(r.s5){
+        const th = r.themeName ? `题材 ${esc(r.themeName)}（T-1 涨停 ${r.themeN1} 只）` : '题材 T-1 涨停家数未知';
+        return `<span class="sy5" title="★ S5 强信号（S5 = 三一 + 环境开关 + 题材T-1≥1）｜${th}｜金额第${r.amtRankFull}名 · ${rankNote||('换手第'+r.trfRankFull+'名')}｜242日回测：均值 +8.67%、胜率 84%、一年约 20 次">★S5</span>${btn}`;
+      }
       return `<span class="sy" title="${tip}｜金额第${r.amtRankFull}名 · ${rankNote||('换手第'+r.trfRankFull+'名')}">★ 三一</span>${btn}`;
     }
     if(!r.amtRankFull) return '<span class="neu">—</span>';
@@ -240,14 +262,6 @@ const COLS = {
     return `<span class="${cls(d)}">${d>0?'+':''}${yi(d)}</span> <span class="dim" style="font-size:11px">${pct>0?'+':''}${pct.toFixed(0)}%</span>`;
   }},
   chg:   {label:'竞价涨幅',       w:80,  render:r=>r.chg==null?'<span class="neu">—</span>':`<span class="${cls(r.chg)}">${sgn(r.chg)}</span>`},
-  closePct:{label:'收盘涨幅',      w:80,  render:r=>{
-    // 收盘后由 backfill_close_to_auction_top() 回写；盘中/未回填时为 null
-    if(r.closePct==null) return '<span class="neu" title="尚未回填收盘数据（收盘后 15:05 自动回填）">—</span>';
-    const extra = (r.closeVsAuctionPct==null) ? ''
-      : ` <span class="dim" style="font-size:11px" title="收盘价相对竞价价的涨跌：竞价买入到收盘的收益">${sgn(r.closeVsAuctionPct)}</span>`;
-    return `<span class="${cls(r.closePct)}">${sgn(r.closePct)}</span>${extra}`;
-  }},
-  closePx:{label:'收盘价',         w:76,  render:r=>r.closePx>0?r.closePx.toFixed(2):'<span class="neu">—</span>'},
   amt:   {label:'竞价金额',       w:82,  render:r=>r.amt>0?yi(r.amt):'<span class="neu">—</span>'},
   tr:    {label:'竞价换手%',      w:80,  render:r=>r.tr==null?'<span class="neu">—</span>':r.tr.toFixed(2)},
   trf:   {label:'自由流通换手%',  w:100, render:r=>r.trf==null?'<span class="neu">—</span>':r.trf.toFixed(2)},
@@ -271,12 +285,12 @@ const COLS = {
   }},
 };
 
-const DEFAULTS = ['idx','name','sanyi','openPx','ps','seal','amtSealRatio','chg','closePct','amt','tr','fmcap','mcap','obp','vr','bs','themes'];
-const DEFAULT_HIDDEN = ['code','obs','trf','plt','sealKeep','amtLbuyRatio','lbuy0915','lbuy0920','lbuy0920t','lbuyDiff1520','lbuyDiff2025','lbuy','avgPx','closePx'];
+const DEFAULTS = ['idx','name','sanyi','openPx','ps','seal','amtSealRatio','chg','amt','tr','fmcap','mcap','obp','vr','bs','themes'];
+const DEFAULT_HIDDEN = ['code','obs','trf','plt','sealKeep','amtLbuyRatio','lbuy0915','lbuy0920','lbuy0920t','lbuyDiff1520','lbuyDiff2025','lbuy','avgPx'];
 
 const PRESETS = {
-  A: ['idx','name','sanyi','chg','closePct','obp','obs','lbuy','seal','amtSealRatio','sealKeep','lbuyDiff1520','lbuyDiff2025','ps','plt','bs','vr','themes'],
-  B: ['idx','name','sanyi','seal','amtSealRatio','amtLbuyRatio','lbuy','sealKeep','lbuy0915','lbuyDiff1520','lbuy0920','lbuyDiff2025','chg','closePct','themes','amt','bs','ps','vr','trf','fmcap','openPx','obs','obp'],
+  A: ['idx','name','sanyi','chg','obp','obs','lbuy','seal','amtSealRatio','sealKeep','lbuyDiff1520','lbuyDiff2025','ps','plt','bs','vr','themes'],
+  B: ['idx','name','sanyi','seal','amtSealRatio','amtLbuyRatio','lbuy','sealKeep','lbuy0915','lbuyDiff1520','lbuy0920','lbuyDiff2025','chg','themes','amt','bs','ps','vr','trf','fmcap','openPx','obs','obp'],
 };
 
 /* ==================================================================
@@ -326,6 +340,11 @@ function mapRow(r){
     sanyiBasis: r.sanyiBasis || null,
     trfRankFull2: r.trfRankFull2 == null ? null : r.trfRankFull2,
     sanyiOut: r.sanyiOut || null,
+    // S5 强信号 = 三一 + 环境开关 + 题材 T-1 涨停家数 >= 1（后端算）
+    s5: !!r.s5,
+    themeN1: r.themeN1 == null ? null : num(r.themeN1),
+    themeName: r.themeName || null,
+    themesSource: r.themesSource || null,
     // 三时点涨停委买额（悟道 09:20前/后/09:25 或 auction_seal 存档 09:15/09:20/09:25）
     seal0915: num(r.seal0915) || 0,
     seal0920: num(r.seal0920) || 0,
@@ -340,10 +359,6 @@ function mapRow(r){
     obs: r.obs || null,
     trf: (r.trf==null?null:num(r.trf)),
     avgPx: (r.avgPx==null?null:num(r.avgPx)),
-    // 收盘回填（收盘后 15:05 由服务器写入归档，盘中为 null）
-    closePx: (r.closePx==null?null:num(r.closePx)),
-    closePct: (r.closePct==null?null:num(r.closePct)),
-    closeVsAuctionPct: (r.closeVsAuctionPct==null?null:num(r.closeVsAuctionPct)),
     themes: Array.isArray(r.themes) ? r.themes : (r.industry && r.industry!=='其他' ? [r.industry] : []),
   };
 }
@@ -364,7 +379,6 @@ function saveState(){ try{ localStorage.setItem(KEY, JSON.stringify(state)); }ca
 
 const NUMSORT = {
   amt:r=>r.amt, chg:r=>r.chg, obp:r=>r.obp, vr:r=>r.vr, tr:r=>r.tr,
-  closePct:r=>r.closePct, closePx:r=>r.closePx, closeVsAuctionPct:r=>r.closeVsAuctionPct,
   trf:r=>r.trf, bs:r=>r.bs, mcap:r=>r.mcap, fmcap:r=>r.fmcap,
   seal:r=>r.seal, lbuy:r=>r.lbuy, ps:r=>r.ps, openPx:r=>r.openPx,
   amtSealRatio:r=>(r.seal>0?r.amt/r.seal:null),
@@ -501,6 +515,39 @@ function banner(kind, html){
      上证≥MA20  n=29  +5.41%  胜率 75.9%  t=2.63
      上证<MA20   n=17  −0.7%
      昨日涨停≥60/80/100 的 t 值反而递减（2.35 / 1.86 / 1.22）→ 只披露不参与开关 */
+/* S5 强信号横幅：三一 + 环境开关 + 题材 T-1 涨停家数 ≥1 三重共振。
+   依据 scripts/analyze_sanyi_clean.py（242 日 / 25 笔）：均值 +8.67%、胜率 84%、
+   1 万实盘复利 ×5.14、最大回撤 6.1%，一年约 20 次 → 出现了就必须大声喊。 */
+function renderS5(env){
+  const box = $('s5bar');
+  const list = (env && env.s5List) || [];
+  if(!list.length){ box.innerHTML = ''; return; }
+  const rows = list.map((r, i)=>{
+    const amt = r.auctionAmount ? (r.auctionAmount/1e8).toFixed(2)+'亿' : '—';
+    const chg = (r.changePct==null) ? '—' : (r.changePct>0?'+':'')+Number(r.changePct).toFixed(2)+'%';
+    const t = r.theme ? `题材 <b>${esc(r.theme)}</b>（T-1 涨停 ${r.themeN1} 只）` : '题材家数未知';
+    return `<div class="s5-row">
+      <span class="n">${i+1}. ${esc(r.name||'')}</span>
+      <span class="c">${esc(r.code||'')}</span>
+      <span class="t">${t}</span>
+      <span class="k">竞价额 ${amt} · 竞价涨幅 <b class="${r.changePct>0?'up':(r.changePct<0?'down':'')}">${chg}</b></span>
+    </div>`;
+  }).join('');
+  box.innerHTML = `<div class="s5bar">
+    <div class="s5-title">🔴 ★ S5 强信号 —— 三一 × 环境 × 题材 三重共振</div>
+    <div class="s5-sub">这种信号一年只出现 20 次左右，今天命中 <b>${list.length}</b> 只</div>
+    <div class="s5-list">${rows}</div>
+    <div class="s5-note">
+      <b>买：</b>今日 09:30 开盘买入。
+      <b>卖：</b>涨停接力 —— D+1 起收盘封板才续持，断板当日收盘卖；
+      D 日封板且次日竞价高开 ≥6% 则次日竞价直接卖。
+      题材家数基准日 ${esc((env&&env.themeN1At)||'—')}。
+      <br><b>242 日回测（仅 25 笔）：</b>均值 +8.67%/笔 · 胜率 84% · 1 万复利 ×5.14 · 最大回撤 6.1% · 平均空仓 89%。
+      <br><b>风险：</b>样本极薄，3 笔贡献 47% 利润；单票不要重仓，严格按接力规则卖。仅供选股参考，非投资建议。
+    </div>
+  </div>`;
+}
+
 function renderEnv(env){
   ENV = env || {};
   const box = $('envbar');
@@ -529,6 +576,9 @@ function renderEnv(env){
     + `<span class="dim">本期命中 ${syCount} 只</span>`
     + (env.sanyiCapMax>0 ? `<span class="dim">｜选票池已剔除>${env.sanyiCapMax}亿</span>` : '')
     + (env.sanyiBearVeto ? `<span class="down">｜空头排列否决</span>` : '')
+    + (env.s5N>0
+        ? `<span class="up">｜S5 <b>${env.s5N}</b> 只</span>`
+        : (env.sanyiN>0 ? `<span class="dim">｜S5 0 只（题材T-1家数不足）</span>` : ''))
     + `</div>`;
 }
 
@@ -661,6 +711,7 @@ async function loadDate(date, force){
     $('selDate').value = date;
 
     const warns = [];
+    if(d.env && d.env.themeError) warns.push('题材家数计算失败：<code>' + esc(d.env.themeError) + '</code>');
     if(d.fallback) warns.push('MySQL 不可用，已从 JSON 归档读取');
     if(d.enrichError) warns.push('增强失败：<code>' + esc(d.enrichError) + '</code>');
     if(!d.inWindow) warns.push('当前不在竞价窗口（09:25–09:30），<b>涨停委买额</b>无法取 09:25 快照，相关列显示「—」');
@@ -668,11 +719,13 @@ async function loadDate(date, force){
     else banner('ok', '数据正常');
 
     renderEnv(d.env);
+    renderS5(d.env);
     renderFoot();
     renderChips(); renderHead(); renderBody();
   }catch(e){
     DATA = [];
     $('envbar').innerHTML = '';
+    $('s5bar').innerHTML = '';
     banner('err', '加载失败：<code>' + esc(e.message||e) + '</code>' +
       '<br>请确认后端已启动，且该日期存在归档（<code>data/auction_top/&lt;date&gt;.json</code>）。');
     $('tbody').innerHTML = '';

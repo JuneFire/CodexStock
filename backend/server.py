@@ -2265,113 +2265,6 @@ def save_auction_top_file(snap):
     return True, date_str
 
 
-def _tx_day_close(code, start_date, end_date):
-    """腾讯**不复权**日K，返回升序 [(date, close)]；失败返回 []。
-
-    用不复权而不是 qfq：归档里的 prevClose 是原始价，复权价跨除权日会算错涨幅。
-    """
-    code = str(code).zfill(6)
-    if code.startswith(("6", "9")):
-        prefix = "sh"
-    elif code.startswith(("4", "8")):
-        prefix = "bj"
-    else:
-        prefix = "sz"
-    symbol = prefix + code
-    url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-           "?param=%s,day,%s,%s,320," % (symbol, start_date, end_date))
-    try:
-        node = ((_gtimg_get(url).json() or {}).get("data") or {}).get(symbol) or {}
-    except Exception:
-        return []
-    out = []
-    for row in (node.get("day") or node.get("qfqday") or []):
-        if not row:
-            continue
-        day = str(row[0])[:10]
-        close = to_float(row[2])
-        if day and close:
-            out.append((day, close))
-    return out
-
-
-def _kline_close_map(codes, date_str):
-    """并发取每只票在 date_str 的收盘价 → {code: close}（缺失的不进字典）。"""
-    codes = [str(c).zfill(6) for c in codes if c]
-    if not codes:
-        return {}
-    try:
-        start = (datetime.strptime(date_str, "%Y-%m-%d")
-                 - timedelta(days=30)).strftime("%Y-%m-%d")
-    except ValueError:
-        return {}
-
-    def work(code):
-        for day, close in _tx_day_close(code, start, date_str):
-            if day == date_str:
-                return code, close
-        return code, None
-
-    out = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        for code, close in pool.map(work, codes):
-            if close:
-                out[code] = close
-    return out
-
-
-def backfill_close_to_auction_top(date_str=None):
-    """收盘后（或任意时间）给竞价归档补上收盘价/收盘涨幅，写回 data/auction_top/<date>.json。
-
-    竞价归档是 09:25 抓的，那时根本没有收盘数据。这里用腾讯日K按 date 取当日收盘，
-    纯文件、不依赖 MySQL（服务器没装 MySQL 也能用），历史日期也能补。
-
-    写入字段：
-      closePx            收盘价
-      closePct           全天涨幅 %（收盘 vs 归档里的 prevClose 昨收）
-      closeVsAuctionPct  收盘 vs 竞价开盘价 %（>0 表示竞价买入到收盘浮盈）
-
-    幂等，可重复调用。返回 {ok, date, total, filled}；失败不抛。
-    """
-    date_str = date_str or datetime.now().strftime("%Y-%m-%d")
-    path = os.path.join(AUCTION_TOP_DIR, date_str + ".json")
-    if not os.path.isfile(path):
-        return {"ok": False, "error": "无当日竞价归档 %s" % date_str}
-    with _lock:
-        try:
-            with open(path, encoding="utf-8") as f:
-                payload = json.load(f) or {}
-        except (OSError, ValueError) as exc:
-            return {"ok": False, "error": "归档读取失败: %r" % (exc,)}
-        records = payload.get("records") or []
-        codes = [r.get("code") for r in records if r.get("code")]
-        if not codes:
-            return {"ok": False, "error": "归档无股票"}
-        closes = _kline_close_map(codes, date_str)
-        if not closes:
-            return {"ok": False, "error": "日K未返回 %s 的收盘价" % date_str}
-        filled = 0
-        for r in records:
-            px = closes.get(str(r.get("code") or "").zfill(6))
-            if not px:
-                continue
-            r["closePx"] = px
-            prev = to_float(r.get("prevClose"))
-            if prev:
-                r["closePct"] = round((px / prev - 1) * 100, 2)
-            au = to_float(r.get("openPx")) or to_float(r.get("price"))
-            if au:
-                r["closeVsAuctionPct"] = round((px / au - 1) * 100, 2)
-            filled += 1
-        payload["records"] = records
-        payload["closeUpdatedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-        os.replace(tmp, path)
-    return {"ok": True, "date": date_str, "total": len(records), "filled": filled}
-
-
 def _auction_top_json_dates(limit=120):
     """竞价榜归档日期列表（倒序），纯文件。"""
     out = []
@@ -2406,69 +2299,128 @@ def _auction_top_json_day(date_str):
     return records
 
 
-def _push_sanyi(date_str, records):
-    """竞价抓取完成后，如果当日环境允许且命中三一票，推送到飞书。
+def _fill_theme_n1(date_str, records):
+    """给每行补 themeName / themeN1 / s5 三个字段（与 /api/auction_top/dynamic 同口径）。"""
+    try:
+        try:
+            from market_env import env_cached, theme_strength
+        except Exception:
+            from backend.market_env import env_cached, theme_strength
+        try:
+            import theme_cache
+        except Exception:
+            from backend import theme_cache
+        env = env_cached(date_str) or {}
+        prev_date = env.get("prevLimitUpDate")
+        on = bool(env.get("sanyiOn"))
+        for r in records or []:
+            code = str(r.get("code") or "").zfill(6)
+            ths = r.get("themes")
+            if not (isinstance(ths, list) and ths):
+                ths = theme_cache.themes_of(code)
+                if ths:
+                    r["themes"] = ths
+            name1, n1 = theme_strength(ths, prev_date) if prev_date else (None, None)
+            r["themeName"] = name1
+            r["themeN1"] = n1
+            r["s5"] = bool(r.get("isSanyi") and on and (n1 or 0) >= 1)
+        return env
+    except Exception as exc:
+        print("[sanyi] 题材家数计算失败: %r" % (exc,), flush=True)
+        return {}
 
-    三一 = 竞价金额前三 + 竞价换手第一（选票阶段已剔除流通市值 >3000 亿，次新豁免）。
-    开关两道（见 backend/market_env.py）：上证距 MA20 >= -1%，且非均线空头排列。
-    242 日/56 笔回测：开关后 41 笔均值 +4.61%、胜率 70.7%。
-    同一天只推一次（重试重跑不重复轰炸）。
+
+def _refresh_theme_cache(date_str):
+    """15:05 收盘后刷新个股题材缓存。悟道 09:15-10:30 停服，只能这个时点补。"""
+    try:
+        try:
+            import theme_cache
+        except Exception:
+            from backend import theme_cache
+        data = theme_cache.load()
+        n1 = theme_cache.merge_archive(date_str, data)
+        n2 = theme_cache.merge_wudao(date_str, data)
+        if n1 or n2:
+            theme_cache.save(data)
+        print("[theme] %s 题材缓存：归档 +%d、悟道 +%d，共 %d 只" % (
+            date_str, n1, n2, len(data.get("stocks") or {})), flush=True)
+    except Exception as exc:
+        print("[theme] 题材缓存刷新失败: %r" % (exc,), flush=True)
+
+
+def _push_sanyi(date_str, records):
+    """09:25 竞价抓完后，命中「S5 强信号」才推送飞书（红色高亮）。
+
+    S5 = 竞价三一 + 环境开关开 + 题材 T-1 涨停家数 >= 1
+      三一    = 竞价金额前三 + 竞价换手第一（选票池已剔除流通市值 >3000 亿，次新豁免）
+       开关    = 上证距 MA20 >= -1% 且非均线空头排列（D-1 收盘口径）
+       题材    = 个股 concept 在 T-1 涨停池里的最大命中家数 >= 1
+
+    242 日回测（scripts/analyze_sanyi_clean.py）：S5 25 笔均值 +8.67%、中位 +7.18%、
+    胜率 84%、t=4.10；1 万实盘复利 ×5.14、最大回撤 6.1%。一年只有 21 次左右，
+    所以命中就重推、无命中就完全静默。
     """
-    hits = [r for r in (records or []) if r.get("isSanyi")]
+    records = records or []
+    hits = [r for r in records if r.get("isSanyi")]
     if not hits:
-        print("[sanyi] 无三一票，跳过推送", flush=True)
+        print("[sanyi] 无三一票，静默", flush=True)
         return False
     if date_str in _SANYI_PUSHED:
         print("[sanyi] %s 已推送过，跳过" % date_str, flush=True)
         return False
-    env = {}
-    try:
-        try:
-            from market_env import env_cached
-        except Exception:
-            from backend.market_env import env_cached
-        env = env_cached(date_str) or {}
-    except Exception as exc:
-        print("[sanyi] 环境读取失败: %r" % (exc,), flush=True)
+    env = _fill_theme_n1(date_str, hits)
     if env.get("ok") and not env.get("sanyiOn"):
-        print("[sanyi] 命中 %d 只但环境开关关（%s），不推送: %s" % (
+        print("[sanyi] 命中三一 %d 只但环境开关关（%s），静默: %s" % (
             len(hits), env.get("sanyiNote"),
             "、".join(str(r.get("name")) for r in hits)), flush=True)
         return False
+    s5 = [r for r in hits if r.get("s5")]
+    if not s5:
+        print("[sanyi] 命中三一 %d 只但题材 T-1 家数不足 1，静默: %s" % (
+            len(hits),
+            "、".join("%s(%s)" % (r.get("name"), r.get("themeN1")) for r in hits)), flush=True)
+        return False
 
-    title = "竞价三一 %s（%d 只）" % (date_str, len(hits))
-    els = [{"tag": "markdown", "content": "**环境** 上证 %s / MA20 %s（%+.2f%%）· 昨日涨停 %s 只" % (
-        env.get("close", "—"), env.get("ma20", "—"), env.get("devMa20Pct") or 0,
-        env.get("prevLimitUp", "—"))}, {"tag": "hr"}]
-    lines = ["# %s 竞价三一 %d 只" % (date_str, len(hits))]
-    for r in hits:
+    n = len(s5)
+    title = "🔴 S5 强信号 · %s · %s" % (date_str, "、".join(str(r.get("name")) for r in s5))
+    head = ("<font color='red'>**★ S5 强信号（三一 + 环境 + 题材全满足）**</font>\n"
+            "<font color='red'>**一年只出现 20 次左右，今天命中 %d 只**</font>\n"
+            "环境：上证 %s / MA20 %s（%+.2f%%）· 昨日涨停 %s 只 · 开关 **开**\n"
+            "题材家数基准日：%s" % (
+                n, env.get("close", "—"), env.get("ma20", "—"), env.get("devMa20Pct") or 0,
+                env.get("prevLimitUp", "—"), env.get("prevLimitUpDate") or "—"))
+    els = [{"tag": "markdown", "content": head}, {"tag": "hr"}]
+    lines = ["# 🔴 S5 强信号 %s（%d 只）" % (date_str, n), head.replace("<font color='red'>", "").replace("</font>", "").replace("**", "")]
+    for r in s5:
         detail = ("竞价额 %.2f 亿 · 金额第 %s 名 · 换手第 %s 名（%.2f%%）· 竞价涨幅 %+.2f%% · "
                   "流通市值 %.0f 亿") % (
             (r.get("auctionAmount") or 0) / 1e8, r.get("amtRankFull"),
             r.get("trfRankFull"), r.get("turnover") or 0, r.get("changePct") or 0,
             (r.get("floatCap") or 0) / 1e8)
-        extra = []
+        extra = ["题材 **%s**（T-1 涨停 %s 只）" % (r.get("themeName") or "—", r.get("themeN1") or 0)]
         if r.get("prevStreak"):
             extra.append("昨日 %s 板" % r.get("prevStreak"))
-        th = r.get("themes")
-        if th:
-            extra.append("、".join(th[:3]) if isinstance(th, list) else str(th))
         if r.get("sealAmount"):
             extra.append("封单 %.2f 亿" % (r["sealAmount"] / 1e8))
-        if extra:
-            detail += "\n" + " · ".join(extra)
-        els.append({"tag": "markdown", "content": "**%s %s**  ★三一\n%s" % (
-            r.get("code"), r.get("name"), detail)})
-        lines.append("### %s %s ★三一" % (r.get("code"), r.get("name")))
+        body = detail + "\n" + " · ".join(extra)
+        els.append({"tag": "markdown", "content":
+                    "<font color='red'>**# %s %s  ★S5**</font>\n%s" % (
+                        r.get("code"), r.get("name"), body)})
+        lines.append("## %s %s ★S5" % (r.get("code"), r.get("name")))
         lines.append(detail)
+        lines.append(" · ".join(extra))
     els.append({"tag": "hr"})
     els.append({"tag": "note", "elements": [{"tag": "plain_text", "content":
-        "今日开盘买 · 次日收盘卖（242 日回测：次日收盘 +3.24%，次日开盘仅 +1.32%）。"
+        "买：今日开盘。卖：涨停接力（D+1 起收盘封板才续持，断板当日收盘卖；"
+        "D 日封板且次日竞价高开>=6% 则竞价卖）。"
+        "242 日回测 S5 均值 +8.67%/笔、1 万复利 ×5.14、回撤 6.1%，样本仅 25 笔。"
         "仅供选股参考，非投资建议。"}]})
     ok = _send_feishu(title, els)
     _send_serverchan(title, "\n\n".join(lines))
     if ok:
         _SANYI_PUSHED.add(date_str)
+        print("[sanyi] 🔴 S5 强信号已推送 %s：%s" % (
+            date_str, "、".join(str(r.get("name")) for r in s5)), flush=True)
     return ok
 
 
@@ -2568,13 +2520,6 @@ def _run_close_sample():
             print("[close] 入库失败: %s" % db.last_error(), flush=True)
         else:
             print("[close] 收盘涨幅已入库: %s %d 只" % (date, len(pct_map)), flush=True)
-        # 竞价窗口的「收盘涨幅」靠文件归档，MySQL 只服务主页面历史；服务器没装 MySQL 也走得通
-        bk = backfill_close_to_auction_top(date)
-        if bk.get("ok"):
-            print("[close] 竞价归档收盘价已回填: %s %d/%d 只" % (
-                date, bk["filled"], bk["total"]), flush=True)
-        else:
-            print("[close] 竞价归档回填跳过: %s" % bk.get("error"), flush=True)
     except Exception as exc:
         print("[close] 收盘抓取失败: %r" % exc, flush=True)
 
@@ -2644,6 +2589,7 @@ def close_fetch_loop(enabled=True):
         time.sleep(sleep_secs)
         _run_close_sample()
         _run_close_review()
+        _refresh_theme_cache(datetime.now().strftime("%Y-%m-%d"))
 
 
 # ---------- 早盘预案定时生成 ----------
@@ -5674,9 +5620,55 @@ class Handler(SimpleHTTPRequestHandler):
                                     int(to_float(r.get("amtRankFull"))) <= 3 and
                                     (int(to_float(r.get("trfRankFull")) or 99) == 1
                                      or int(to_float(r.get("trfRankFull2")) or 99) == 1))
+
+            # 题材 T-1 涨停家数 —— 三一的加强条件（S5）。
+            # 依据 scripts/analyze_sanyi_clean.py：环境开关 + 题材T-1>=1 + 三一，
+            # 242 日/25 笔 → 均值 +8.67%、胜率 84%、t=4.10（全样本 56 笔为 +4.09%）。
+            # 个股 concept 取自 data/cache/stock_themes.json（悟道归档回填，09:25 零网络），
+            # T-1 涨停原因取自同花顺涨停池归档（backend/market_env.ztpool_rows）。
+            s5List = []
+            themeErr = None
+            try:
+                try:
+                    from market_env import theme_strength
+                except Exception:
+                    from backend.market_env import theme_strength
+                try:
+                    import theme_cache
+                except Exception:
+                    from backend import theme_cache
+                prev_date = (env or {}).get("prevLimitUpDate")
+                for r in rows:
+                    code = str(r.get("code") or "").zfill(6)
+                    ths = r.get("themes")
+                    if not (isinstance(ths, list) and ths):
+                        ths = theme_cache.themes_of(code)
+                        if ths:
+                            r["themes"] = ths
+                            r["themesSource"] = "cache"
+                    name1, n1 = theme_strength(ths, prev_date) if prev_date else (None, None)
+                    r["themeName"] = name1
+                    r["themeN1"] = n1
+                    on = bool((env or {}).get("sanyiOn"))
+                    r["s5"] = bool(r.get("isSanyi") and on and (n1 or 0) >= 1)
+                    if r["s5"]:
+                        s5List.append({"code": code, "name": r.get("name"),
+                                       "theme": name1, "themeN1": n1,
+                                       "auctionAmount": r.get("auctionAmount"),
+                                       "changePct": r.get("changePct")})
+            except Exception as exc:
+                themeErr = str(exc)
+                print("[sanyi] 题材家数计算失败: %r" % (exc,), flush=True)
+
             env = dict(env or {})
             env["sanyiCapMax"] = cap_max
             env["sanyiExcluded"] = sum(1 for r in rows if r.get("sanyiOut") == "cap")
+            env["sanyiN"] = sum(1 for r in rows if r.get("isSanyi"))
+            env["s5N"] = len(s5List)
+            env["s5List"] = s5List
+            env["themeN1At"] = env.get("prevLimitUpDate")
+            if themeErr:
+                env["themeError"] = themeErr
 
             AUCTION_DYN_CACHE.update({"ts": time.time(), "date": date, "rows": rows,
                                       "env": env})
@@ -5755,12 +5747,6 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": True, "date": snap["date"], "count": len(snap["records"])})
             except Exception as exc:
                 self.send_json({"ok": False, "error": "抓取失败: %s" % exc}, status=502)
-            return
-        if parsed.path == "/api/auction_top/backfill_close":
-            # 收盘后回填当日（或指定日）竞价归档的收盘价/收盘涨幅；幂等，可重复调用
-            date = (parse_qs(parsed.query).get("date") or [""])[0]
-            res = backfill_close_to_auction_top(date or None)
-            self.send_json(res, status=200 if res.get("ok") else 502)
             return
         if parsed.path == "/api/review/dates":
             try:

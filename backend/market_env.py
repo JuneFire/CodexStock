@@ -21,6 +21,7 @@
 """
 import json
 import os
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -190,6 +191,63 @@ def limit_up_count(date_str, allow_fetch=True):
     if allow_fetch:
         return _fetch_ztpool(date_str)
     return None
+
+
+# ---------------- 题材 T-1 涨停家数（竞价三一 S5 条件） ----------------
+
+_ZTPOOL_ROWS = {}
+_ZTPOOL_LOCK = threading.Lock()
+
+
+def ztpool_rows(date_str, allow_fetch=True):
+    """某交易日涨停池的行（含 limitUpReason）。内存缓存 + 本地文件优先。"""
+    if not date_str:
+        return []
+    with _ZTPOOL_LOCK:
+        if date_str in _ZTPOOL_ROWS:
+            return _ZTPOOL_ROWS[date_str]
+    rows = []
+    path = os.path.join(ZTPOOL_DIR, date_str + ".json")
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                rows = (json.load(f) or {}).get("rows") or []
+        except (OSError, ValueError):
+            rows = []
+    if not rows and allow_fetch:
+        _fetch_ztpool(date_str)
+        try:
+            with open(path, encoding="utf-8") as f:
+                rows = (json.load(f) or {}).get("rows") or []
+        except (OSError, ValueError):
+            rows = []
+    if rows:
+        with _ZTPOOL_LOCK:
+            _ZTPOOL_ROWS[date_str] = rows
+    return rows
+
+
+def theme_strength(themes, date_str, allow_fetch=True):
+    """该股 concept 列表在 date_str 当天涨停池里命中最多的一条，返回 (题材名, 家数)。
+
+    口径与 `scripts/analyze_sanyi_clean.py` / `scripts/analyze_sanyi_attribution.py`
+    的 `theme_strength()` 完全一致：拿个股 concept 字符串去匹 T-1 涨停股的
+    `limitUpReason` 文本，取家数最大的那条题材。
+    """
+    if not themes or not date_str:
+        return None, None
+    rows = ztpool_rows(date_str, allow_fetch=allow_fetch)
+    if not rows:
+        return None, None
+    best, bestn = None, -1
+    for t in themes:
+        t = (t or "").strip()
+        if len(t) < 2:
+            continue
+        n = sum(1 for r in rows if t in (r.get("limitUpReason") or ""))
+        if n > bestn:
+            best, bestn = t, n
+    return best, (bestn if bestn >= 0 else None)
 
 
 # ---------------- 组装环境 ----------------
