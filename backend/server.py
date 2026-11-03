@@ -1984,12 +1984,12 @@ def seal_fetch_loop(enabled=True):
 
 
 def _limit_pct_for(code, name=""):
-    """按代码前缀 + 名称推断涨跌幅限制（%）。300/301/688/689 → 20%，4/8 开头 → 30%，ST → 5%，其余 10%。"""
+    """按代码前缀 + 名称推断涨跌幅限制（%）。300/301/688/689 → 20%，北交所 4/8/92 开头 → 30%，ST → 5%，其余 10%。"""
     code = str(code or "")
     name = str(name or "")
     if code.startswith(("300", "301", "688", "689")):
         return 20.0
-    if code.startswith(("4", "8")):
+    if code.startswith(("4", "8", "92")):
         return 30.0
     if "ST" in name.upper():
         return 5.0
@@ -1997,10 +1997,15 @@ def _limit_pct_for(code, name=""):
 
 
 def _limit_up_price(prev_close, code="", name=""):
-    """涨停价（保留 2 位小数）。prev_close 缺失/非正时返回 None。"""
+    """涨停价（保留 2 位小数）。prev_close 缺失/非正时返回 None。
+
+    交易所是四舍五入到分，不能用 round()：Python 的银行家舍入加浮点误差会让
+    8.635 算成 8.63、11.385 算成 11.38，差一分就把「收盘=涨停价」判成否。
+    """
     if not prev_close or prev_close <= 0:
         return None
-    return round(prev_close * (1 + _limit_pct_for(code, name) / 100.0), 2)
+    raw = prev_close * (1 + _limit_pct_for(code, name) / 100.0) * 100.0
+    return int(raw + 0.5) / 100.0
 
 
 def _seal_bid_amount(quote, code="", name=""):
@@ -2192,6 +2197,8 @@ def _finalize_auction_top(snapshot, n, now=None, source_label=""):
         for rec in records:
             if rec.get("ps") is None:
                 rec["ps"] = lb_map.get(str(rec.get("code") or "").zfill(6), 0)
+    # 板型（一字板/T字板/换手板）也只有悟道有，用前一交易日日K推（只算昨涨停那几十只）
+    _fill_prev_limit_up_type(records, today)
     return records
 
 
@@ -2263,6 +2270,204 @@ def save_auction_top_file(snap):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
     return True, date_str
+
+
+def _day_bars(code, start_date, end_date):
+    """**不复权**日K，升序 [(date, open, close, high, low)]。东财主源、腾讯兜底；失败 []。
+
+    不复权而不是 qfq：归档里 prevClose 是原始价，复权价跨除权日会把涨幅/涨停价算错。
+    腾讯 fqkline 会被 WAF 拦（返回 501 挑战页），所以默认走东财。
+    """
+    code = str(code).zfill(6)
+    mkt = "1" if code.startswith(("6", "9")) else "0"
+    url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
+           "?secid=%s.%s&fields1=f1&fields2=f51,f52,f53,f54,f55"
+           "&klt=101&fqt=0&beg=%s&end=%s"
+           % (mkt, code, start_date.replace("-", ""), end_date.replace("-", "")))
+    try:
+        node = (_gtimg_get(url).json() or {}).get("data") or {}
+        out = []
+        for line in node.get("klines") or []:
+            f = str(line).split(",")
+            if len(f) < 5:
+                continue
+            day = f[0][:10]
+            c = to_float(f[2])
+            if day and c is not None:
+                out.append((day, to_float(f[1]), c, to_float(f[3]), to_float(f[4])))
+        if out:
+            return out
+    except Exception:
+        pass
+    return _tx_day_bars(code, start_date, end_date)
+
+
+def _tx_day_bars(code, start_date, end_date):
+    """腾讯**不复权**日K，返回升序 [(date, open, close, high, low)]；失败返回 []。
+
+    不复权而不是 qfq：归档里 prevClose 是原始价，复权价跨除权日会把涨幅/涨停价算错。
+    """
+    code = str(code).zfill(6)
+    if _is_bj(code):
+        prefix = "bj"          # 4/8/9 开头：北交所（920xxx 也在这里，不能因 9 归到沪市）
+    elif code.startswith("6"):
+        prefix = "sh"
+    else:
+        prefix = "sz"
+    symbol = prefix + code
+    url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+           "?param=%s,day,%s,%s,320," % (symbol, start_date, end_date))
+    try:
+        node = ((_gtimg_get(url).json() or {}).get("data") or {}).get(symbol) or {}
+    except Exception:
+        return []
+    out = []
+    for row in (node.get("day") or node.get("qfqday") or []):
+        if not row or len(row) < 5:
+            continue
+        day = str(row[0])[:10]
+        o, c = to_float(row[1]), to_float(row[2])
+        h, l = to_float(row[3]), to_float(row[4])
+        if day and c is not None:
+            out.append((day, o, c, h, l))
+    return out
+
+
+def _kline_bars_map(codes, date_str):
+    """并发取每只票的日K窗口 → {code: [(date, open, close, high, low)] 升序}。"""
+    codes = [str(c).zfill(6) for c in codes if c]
+    if not codes:
+        return {}
+    try:
+        start = (datetime.strptime(date_str, "%Y-%m-%d")
+                 - timedelta(days=40)).strftime("%Y-%m-%d")
+    except ValueError:
+        return {}
+    out = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        for code, bars in zip(codes, pool.map(
+                lambda c: _day_bars(c, start, date_str), codes)):
+            if bars:
+                out[code] = bars
+    return out
+
+
+def _limit_up_type_of(prev_close, bar, code="", name=""):
+    """(昨收, 当日 bar) → '一字板' / 'T字板' / '换手板'；当日未涨停返回 None。
+
+    一字板：开=收=最低=涨停价（全天一个价）
+    T字板：开盘就涨停价，盘中回落，收盘回封
+    换手板：盘中拉升后封住（开盘不是涨停价）
+    """
+    lpx = _limit_up_price(prev_close, code, name)
+    if not lpx or not bar:
+        return None
+    _, o, c, _h, l = bar
+    if o is None or c is None or l is None:
+        return None
+    eps = 0.005                      # 半个最小报价单位（0.01）：1.83 vs 1.84 必须判成不同价
+    if abs(c - lpx) > eps:           # 收盘没封住 → 不是涨停板型
+        return None
+    if abs(o - lpx) <= eps:
+        return "一字板" if abs(l - lpx) <= eps else "T字板"
+    return "换手板"
+
+
+def _fill_prev_limit_up_type(records, date_str):
+    """给缺 plt 的昨涨停股补板型（用前一交易日日K），返回补的条数。
+
+    只处理 ps >= 1 且没有 plt 的行（悟道源自带 plt 时不覆盖），09:25 主流程一般只有
+    二十多只，并发拉日K约 2-3 秒。
+    """
+    targets = [r for r in records
+               if r.get("code") and not r.get("plt") and (r.get("ps") or 0) >= 1]
+    if not targets:
+        return 0
+    bars_map = _kline_bars_map([r["code"] for r in targets], date_str)
+    filled = 0
+    for r in targets:
+        bars = bars_map.get(str(r["code"]).zfill(6)) or []
+        idx = next((i for i, b in enumerate(bars) if b[0] == date_str), None)
+        if idx is None or idx < 2:
+            continue
+        t = _limit_up_type_of(bars[idx - 2][2], bars[idx - 1],
+                              r["code"], r.get("name") or "")
+        if t:
+            r["plt"] = t
+            filled += 1
+    return filled
+
+
+def backfill_close_to_auction_top(date_str=None):
+    """给竞价归档补上收盘价/收盘涨幅/昨日板型，写回 data/auction_top/<date>.json。
+
+    竞价归档是 09:25 抓的，那时没有收盘数据，板型也拿不到（悟道停服）。这里用腾讯
+    不复权日K按 date 取当日与前一交易日，纯文件、不依赖 MySQL，历史日期也准。
+
+    写入字段：
+      closePx            收盘价
+      closePct           全天涨幅 %（收盘 vs 归档里的 prevClose 昨收）
+      closeVsAuctionPct  收盘 vs 竞价开盘价 %（>0 表示竞价买入到收盘浮盈）
+      plt                昨日板型（一字板/T字板/换手板，已有则不覆盖）
+
+    幂等，可重复调用。返回 {ok, date, total, filled, pltFilled}；失败不抛。
+    """
+    date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+    path = os.path.join(AUCTION_TOP_DIR, date_str + ".json")
+    if not os.path.isfile(path):
+        return {"ok": False, "error": "无当日竞价归档 %s" % date_str}
+    with _lock:
+        try:
+            with open(path, encoding="utf-8") as f:
+                payload = json.load(f) or {}
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "error": "归档读取失败: %r" % (exc,)}
+        records = payload.get("records") or []
+        codes = [r.get("code") for r in records if r.get("code")]
+        if not codes:
+            return {"ok": False, "error": "归档无股票"}
+        bars_map = _kline_bars_map(codes, date_str)
+        if not bars_map:
+            return {"ok": False, "error": "日K未返回 %s 的数据" % date_str}
+        # 老归档可能是悟道停服时抓的，ps 为空；先补齐板数，板型才有得算
+        lb_map = _prev_lb_map_for(date_str)
+        ps_filled = 0
+        if lb_map:
+            for r in records:
+                if r.get("ps") is None:
+                    r["ps"] = lb_map.get(str(r.get("code") or "").zfill(6), 0)
+                    ps_filled += 1
+        filled = plt_filled = 0
+        for r in records:
+            bars = bars_map.get(str(r.get("code") or "").zfill(6)) or []
+            idx = next((i for i, b in enumerate(bars) if b[0] == date_str), None)
+            if idx is None:
+                continue
+            px = bars[idx][2]
+            if not px:
+                continue
+            r["closePx"] = px
+            prev = to_float(r.get("prevClose")) or (bars[idx - 1][2] if idx else None)
+            if prev:
+                r["closePct"] = round((px / prev - 1) * 100, 2)
+            au = to_float(r.get("openPx")) or to_float(r.get("price"))
+            if au:
+                r["closeVsAuctionPct"] = round((px / au - 1) * 100, 2)
+            filled += 1
+            if not r.get("plt") and idx >= 2 and (r.get("ps") or 0) >= 1:
+                t = _limit_up_type_of(bars[idx - 2][2], bars[idx - 1],
+                                      r["code"], r.get("name") or "")
+                if t:
+                    r["plt"] = t
+                    plt_filled += 1
+        payload["records"] = records
+        payload["closeUpdatedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    return {"ok": True, "date": date_str, "total": len(records),
+            "filled": filled, "pltFilled": plt_filled, "psFilled": ps_filled}
 
 
 def _auction_top_json_dates(limit=120):
@@ -2520,6 +2725,14 @@ def _run_close_sample():
             print("[close] 入库失败: %s" % db.last_error(), flush=True)
         else:
             print("[close] 收盘涨幅已入库: %s %d 只" % (date, len(pct_map)), flush=True)
+        # 竞价窗口的「收盘涨幅/收盘价/昨日板型」靠文件归档，MySQL 只服务主页面历史；
+        # 服务器没装 MySQL 也能走通。
+        bk = backfill_close_to_auction_top(date)
+        if bk.get("ok"):
+            print("[close] 竞价归档已回填: %s 收盘 %d/%d 只、板型 %d 只" % (
+                date, bk["filled"], bk["total"], bk.get("pltFilled", 0)), flush=True)
+        else:
+            print("[close] 竞价归档回填跳过: %s" % bk.get("error"), flush=True)
     except Exception as exc:
         print("[close] 收盘抓取失败: %r" % exc, flush=True)
 
@@ -5723,6 +5936,12 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "未找到该日期竞价榜数据: %s" % date}, status=404)
             else:
                 self.send_json({"ok": True, "date": date, "rows": rows, "fallback": fallback})
+            return
+        if parsed.path == "/api/auction_top/backfill_close":
+            # 回填当日（或指定日）归档的收盘价/收盘涨幅/昨日板型；幂等，可重复调用
+            date = (parse_qs(parsed.query).get("date") or [""])[0]
+            res = backfill_close_to_auction_top(date or None)
+            self.send_json(res, status=200 if res.get("ok") else 502)
             return
         if parsed.path == "/api/auction_top/refresh":
             try:

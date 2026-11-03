@@ -172,7 +172,7 @@
    配置区
    ================================================================== */
 const API_BASE = '';                       // 与后端同源，留空即可
-const KEY = 'auction_dyn_cols_v2';         // 独立 localStorage key，不与静态页冲突
+const KEY = 'auction_dyn_cols_v3';         // 独立 localStorage key，不与静态页冲突（v3：新增收盘涨幅/收盘价）
 const DAY_CACHE = 'auction_dyn_days_v1';   // 已知日期缓存
 
 /* ==================================================================
@@ -262,6 +262,14 @@ const COLS = {
     return `<span class="${cls(d)}">${d>0?'+':''}${yi(d)}</span> <span class="dim" style="font-size:11px">${pct>0?'+':''}${pct.toFixed(0)}%</span>`;
   }},
   chg:   {label:'竞价涨幅',       w:80,  render:r=>r.chg==null?'<span class="neu">—</span>':`<span class="${cls(r.chg)}">${sgn(r.chg)}</span>`},
+  closePct:{label:'收盘涨幅',      w:80,  render:r=>{
+    // 收盘后由 backfill_close_to_auction_top() 回写；盘中/未回填时为 null
+    if(r.closePct==null) return '<span class="neu" title="还没回填收盘数据（收盘后 15:05 自动回填）">—</span>';
+    const extra = (r.closeVsAuctionPct==null) ? ''
+      : ` <span class="dim" style="font-size:11px" title="收盘价相对竞价开盘价的涨跌：竞价买入到收盘的收益">${sgn(r.closeVsAuctionPct)}</span>`;
+    return `<span class="${cls(r.closePct)}">${sgn(r.closePct)}</span>${extra}`;
+  }},
+  closePx:{label:'收盘价',         w:76,  render:r=>r.closePx>0?r.closePx.toFixed(2):'<span class="neu">—</span>'},
   amt:   {label:'竞价金额',       w:82,  render:r=>r.amt>0?yi(r.amt):'<span class="neu">—</span>'},
   tr:    {label:'竞价换手%',      w:80,  render:r=>r.tr==null?'<span class="neu">—</span>':r.tr.toFixed(2)},
   trf:   {label:'自由流通换手%',  w:100, render:r=>r.trf==null?'<span class="neu">—</span>':r.trf.toFixed(2)},
@@ -285,12 +293,12 @@ const COLS = {
   }},
 };
 
-const DEFAULTS = ['idx','name','sanyi','openPx','ps','seal','amtSealRatio','chg','amt','tr','fmcap','mcap','obp','vr','bs','themes'];
-const DEFAULT_HIDDEN = ['code','obs','trf','plt','sealKeep','amtLbuyRatio','lbuy0915','lbuy0920','lbuy0920t','lbuyDiff1520','lbuyDiff2025','lbuy','avgPx'];
+const DEFAULTS = ['idx','name','sanyi','openPx','ps','seal','amtSealRatio','chg','closePct','amt','tr','fmcap','mcap','obp','vr','bs','themes'];
+const DEFAULT_HIDDEN = ['code','obs','trf','plt','sealKeep','amtLbuyRatio','lbuy0915','lbuy0920','lbuy0920t','lbuyDiff1520','lbuyDiff2025','lbuy','avgPx','closePx'];
 
 const PRESETS = {
-  A: ['idx','name','sanyi','chg','obp','obs','lbuy','seal','amtSealRatio','sealKeep','lbuyDiff1520','lbuyDiff2025','ps','plt','bs','vr','themes'],
-  B: ['idx','name','sanyi','seal','amtSealRatio','amtLbuyRatio','lbuy','sealKeep','lbuy0915','lbuyDiff1520','lbuy0920','lbuyDiff2025','chg','themes','amt','bs','ps','vr','trf','fmcap','openPx','obs','obp'],
+  A: ['idx','name','sanyi','chg','closePct','obp','obs','lbuy','seal','amtSealRatio','sealKeep','lbuyDiff1520','lbuyDiff2025','ps','plt','bs','vr','themes'],
+  B: ['idx','name','sanyi','seal','amtSealRatio','amtLbuyRatio','lbuy','sealKeep','lbuy0915','lbuyDiff1520','lbuy0920','lbuyDiff2025','chg','closePct','themes','amt','bs','ps','vr','trf','fmcap','openPx','obs','obp'],
 };
 
 /* ==================================================================
@@ -359,6 +367,10 @@ function mapRow(r){
     obs: r.obs || null,
     trf: (r.trf==null?null:num(r.trf)),
     avgPx: (r.avgPx==null?null:num(r.avgPx)),
+    // 收盘回填（收盘后 15:05 由服务器写入归档，盘中为 null）
+    closePx: (r.closePx==null?null:num(r.closePx)),
+    closePct: (r.closePct==null?null:num(r.closePct)),
+    closeVsAuctionPct: (r.closeVsAuctionPct==null?null:num(r.closeVsAuctionPct)),
     themes: Array.isArray(r.themes) ? r.themes : (r.industry && r.industry!=='其他' ? [r.industry] : []),
   };
 }
@@ -379,6 +391,7 @@ function saveState(){ try{ localStorage.setItem(KEY, JSON.stringify(state)); }ca
 
 const NUMSORT = {
   amt:r=>r.amt, chg:r=>r.chg, obp:r=>r.obp, vr:r=>r.vr, tr:r=>r.tr,
+  closePct:r=>r.closePct, closePx:r=>r.closePx, closeVsAuctionPct:r=>r.closeVsAuctionPct,
   trf:r=>r.trf, bs:r=>r.bs, mcap:r=>r.mcap, fmcap:r=>r.fmcap,
   seal:r=>r.seal, lbuy:r=>r.lbuy, ps:r=>r.ps, openPx:r=>r.openPx,
   amtSealRatio:r=>(r.seal>0?r.amt/r.seal:null),
