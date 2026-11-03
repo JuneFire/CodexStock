@@ -34,7 +34,7 @@ from backtest_step2_auction_filter import load_bars             # noqa: E402
 
 AU = os.path.join(ROOT, "data", "auction_hist")
 TICK = os.path.join(ROOT, "data", "cache", "ticker_list_date.json")
-OUT = os.path.join(ROOT, "reports", "backtest_sanyi_cap.json")
+OUT = os.path.join(ROOT, "reports", "三一竞价", "backtest_sanyi_cap.json")
 BUCKETS = ("topBidAmount", "topLimitBuyAmount", "limitUpOpen", "limitDownOpen",
            "lateBidUp", "lateBidDown", "prevLimitUpFeedback", "prevBrokenFeedback")
 NEW_DAYS = 365
@@ -255,7 +255,7 @@ def main():
     json.dump({"caps": caps, "res": res}, open(OUT, "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
     print()
-    print("明细 → reports/backtest_sanyi_cap.json")
+    print("明细 → reports/三一竞价/backtest_sanyi_cap.json")
 
 
 if __name__ == "__main__":

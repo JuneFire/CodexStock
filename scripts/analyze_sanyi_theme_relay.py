@@ -14,11 +14,11 @@
     rule_b      分档 + 涨停接力（生产 B 规则）
   ret = 卖出价 / D 日开盘价 - 1
 
-数据：reports/sanyi_attribution.json（56 笔逐笔 + themeN/luReason）
+数据：reports/三一竞价/sanyi_attribution.json（56 笔逐笔 + themeN/luReason）
       scripts/sanyi_hold_longer.py 的 walk() 取各口径收益
       data/index_kline/sh000001.json 作交易日历
 
-输出：reports/sanyi_theme_relay.json + 控制台表
+输出：reports/三一竞价/sanyi_theme_relay.json + 控制台表
 """
 import os
 import sys
@@ -31,9 +31,9 @@ sys.path.insert(0, HERE)
 
 from sanyi_hold_longer import walk  # noqa: E402
 
-ATTR = os.path.join(ROOT, "reports", "sanyi_attribution.json")
+ATTR = os.path.join(ROOT, "reports", "三一竞价", "sanyi_attribution.json")
 CAL_PATH = os.path.join(ROOT, "data", "index_kline", "sh000001.json")
-OUT = os.path.join(ROOT, "reports", "sanyi_theme_relay.json")
+OUT = os.path.join(ROOT, "reports", "三一竞价", "sanyi_theme_relay.json")
 
 GAP_TH = 6.0
 

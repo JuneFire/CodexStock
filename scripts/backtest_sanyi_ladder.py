@@ -37,7 +37,7 @@ from backtest_sanyi import load_days, mark                       # noqa: E402
 
 ZT = "data/market/ztpool_bt"
 KD = "data/backtest_kline"
-OUT = "reports/backtest_sanyi_ladder.json"
+OUT = "reports/三一竞价/backtest_sanyi_ladder.json"
 GOOD = ("最优", "健康")
 EXCL = ("超标", "剔除", "高风险")
 _BARS = {}

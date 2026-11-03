@@ -4,7 +4,7 @@
 用户口径（m03241）：选三一票时把 500 亿市值以上的剔除，次新股除外。
 
 数据来源（均本地/已缓存，零配额）：
-- 三一交易明细：reports/backtest_sanyi.json 的 a 线（242 交易日）
+- 三一交易明细：reports/三一竞价/backtest_sanyi.json 的 a 线（242 交易日）
 - 流通市值：data/auction_hist/<D>.json 的 circMcap（悟道原始字段，单位元）
 - 自由流通市值：同上，用 prevClose × auctionVolume × 10000 / turnoverRateF 反推
 - 上市日期：data/cache/ticker_list_date.json（同花顺 meta/tickers/list 的 list_date）
@@ -19,7 +19,7 @@ import statistics as stt
 from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SAN = os.path.join(ROOT, "reports", "backtest_sanyi.json")
+SAN = os.path.join(ROOT, "reports", "三一竞价", "backtest_sanyi.json")
 AU = os.path.join(ROOT, "data", "auction_hist")
 TICK = os.path.join(ROOT, "data", "cache", "ticker_list_date.json")
 NEW_STOCK_DAYS = 365
@@ -175,11 +175,11 @@ def main():
     if dropped:
         stat("被剔除的 %d 笔" % len(dropped), dropped, "ret_c")
 
-    out = os.path.join(ROOT, "reports", "sanyi_mktcap.json")
+    out = os.path.join(ROOT, "reports", "三一竞价", "sanyi_mktcap.json")
     json.dump({"rows": rows, "res": res, "thresholds": [0, 200, 300, 500, 800, 1000]},
               open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     print()
-    print("明细 → reports/sanyi_mktcap.json")
+    print("明细 → reports/三一竞价/sanyi_mktcap.json")
 
 
 if __name__ == "__main__":

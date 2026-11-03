@@ -278,7 +278,7 @@ def fetch_auction_stocks(top_n=None, stage="live", key=None, keep=None,
         stocks.append(rec)
     stocks.sort(key=lambda s: s["auctionAmount"] or 0, reverse=True)
     # 全市场排名（截断前算，否则前排排名失真）：金额名次 + 换手名次
-    # 「竞价三一」判据 = 金额前三 且 换手第一（见 reports/竞价三一回测_242日.md）
+    # 「竞价三一」判据 = 金额前三 且 换手第一（见 reports/三一竞价/竞价三一回测_242日.md）
     # 选票阶段先剔除超大市值（SANYI_CAP_MAX_YI 亿，次新股除外）：大票永远做不到
     # 换手第一，却会占掉「金额前三」的名额，留在池里等于把真候选挤到第四名。
     # 242 日回测：剔除 >3000 亿后 t 2.05→2.34、累计 +144%→+182%，且原有命中一笔不丢。

@@ -2,7 +2,7 @@
 
 口径：D 日 09:25 出信号 → D 日开盘买 → D+1 收盘卖（ret_c）/ D+1 开盘卖（ret_o）。
 用法：python scripts/analyze_sanyi_attribution.py [--cap 3000]
-输出：reports/sanyi_attribution.json + 控制台报表
+输出：reports/三一竞价/sanyi_attribution.json + 控制台报表
 """
 from __future__ import annotations
 
@@ -164,7 +164,7 @@ def theme_strength(themes, zt, d):
 # ---------- 主流程 ----------
 
 def build(cap):
-    capdata = load_json(P("reports", "backtest_sanyi_cap.json")) or {}
+    capdata = load_json(P("reports", "三一竞价", "backtest_sanyi_cap.json")) or {}
     res = (capdata.get("res") or {}).get(str(cap)) or capdata.get("res", {}).get("3000")
     trades = res.get("trades") or []
     idx, cal = load_index()
@@ -490,9 +490,9 @@ def main():
     for label, rho in sorted(res2, key=lambda x: -(abs(x[1]) if x[1] is not None else -1)):
         print("- %s：ρ = %s" % (label, fmt(rho, 3)))
 
-    with io.open(P("reports", "sanyi_attribution.json"), "w", encoding="utf-8") as f:
+    with io.open(P("reports", "三一竞价", "sanyi_attribution.json"), "w", encoding="utf-8") as f:
         json.dump({"cap": cap, "rows": rows}, f, ensure_ascii=False, indent=1)
-    print("\n明细已写入 reports/sanyi_attribution.json")
+    print("\n明细已写入 reports/三一竞价/sanyi_attribution.json")
 
 
 if __name__ == "__main__":

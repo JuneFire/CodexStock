@@ -13,8 +13,8 @@ import json
 import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SW = os.path.join(ROOT, "reports", "sanyi_switch_days.json")
-BT = os.path.join(ROOT, "reports", "backtest_sanyi_cap.json")
+SW = os.path.join(ROOT, "reports", "三一竞价", "sanyi_switch_days.json")
+BT = os.path.join(ROOT, "reports", "三一竞价", "backtest_sanyi_cap.json")
 START = 10000.0
 
 

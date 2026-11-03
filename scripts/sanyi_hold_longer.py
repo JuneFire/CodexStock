@@ -28,9 +28,9 @@ sys.path.insert(0, HERE)
 
 from backtest_workflow_t1 import limit_pct  # noqa: E402
 
-CJS = os.path.join(ROOT, "reports", "backtest_sanyi_cap.json")
+CJS = os.path.join(ROOT, "reports", "三一竞价", "backtest_sanyi_cap.json")
 KDIR = os.path.join(ROOT, "data", "backtest_kline")
-OUT = os.path.join(ROOT, "reports", "sanyi_hold.json")
+OUT = os.path.join(ROOT, "reports", "三一竞价", "sanyi_hold.json")
 CAP_KEY = "3000"
 MAX_HOLD = 20          # 最多持有 20 个交易日
 COST = 0.0             # 暂不计费用

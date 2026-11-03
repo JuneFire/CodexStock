@@ -25,7 +25,7 @@ import sanyi_hold_longer as H          # noqa: E402
 import sanyi_equity as E               # noqa: E402
 from backend import sanyi_rules as R    # noqa: E402
 
-BT = "reports/backtest_sanyi_cap.json"
+BT = "reports/三一竞价/backtest_sanyi_cap.json"
 CAL = "data/index_kline/sh000001.json"
 CAP0 = 10000.0
 

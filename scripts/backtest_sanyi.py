@@ -31,7 +31,7 @@ from backtest_step2_auction_filter import (                      # noqa: E402
     load_bars, load_pool, stat, four_period)
 
 AU = "data/auction_hist"
-OUT = "reports/backtest_sanyi.json"
+OUT = "reports/三一竞价/backtest_sanyi.json"
 
 
 def f(v):

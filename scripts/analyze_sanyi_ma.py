@@ -2,7 +2,7 @@
 """竞价三一 × 上证均线位置（MA5 / MA10 / MA20 / MA60）胜率拆分。
 
 口径：
-    三一明细来自 reports/backtest_sanyi_cap.json（scripts/backtest_sanyi_cap.py 产出）。
+    三一明细来自 reports/三一竞价/backtest_sanyi_cap.json（scripts/backtest_sanyi_cap.py 产出）。
     收益 ret_c = D 日开盘买 → D+1 收盘卖；ret_o = D 日开盘买 → D+1 开盘卖。
     均线只用 **D-1 及之前**的收盘（09:25 那一刻能看到的信息），不用 D 日收盘——
     否则就是未来函数。
@@ -16,9 +16,9 @@ import os
 import statistics as stt
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BT = os.path.join(ROOT, "reports", "backtest_sanyi_cap.json")
+BT = os.path.join(ROOT, "reports", "三一竞价", "backtest_sanyi_cap.json")
 IDX = os.path.join(ROOT, "data", "index_kline", "sh000001.json")
-OUT = os.path.join(ROOT, "reports", "sanyi_ma.json")
+OUT = os.path.join(ROOT, "reports", "三一竞价", "sanyi_ma.json")
 MAS = (5, 10, 20, 60)
 
 
@@ -124,7 +124,7 @@ def main():
     json.dump({"cap": args.cap, "rows": rows}, open(OUT, "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
     print()
-    print("明细 → reports/sanyi_ma.json")
+    print("明细 → reports/三一竞价/sanyi_ma.json")
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sanyi_hold_longer as H  # noqa: E402
 import sanyi_equity as E       # noqa: E402
 
-BT = "reports/backtest_sanyi_cap.json"
+BT = "reports/三一竞价/backtest_sanyi_cap.json"
 CAL_PATH = "data/index_kline/sh000001.json"
 
 
@@ -191,9 +191,9 @@ def main():
         print("\n" + "-" * 92)
         path(on, "B")
 
-    json.dump(res, open("reports/sanyi_equity_compare.json", "w", encoding="utf-8"),
+    json.dump(res, open("reports/三一竞价/sanyi_equity_compare.json", "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
-    print("\n明细已写入 reports/sanyi_equity_compare.json")
+    print("\n明细已写入 reports/三一竞价/sanyi_equity_compare.json")
 
 
 if __name__ == "__main__":
