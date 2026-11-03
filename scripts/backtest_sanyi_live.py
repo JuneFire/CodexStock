@@ -208,6 +208,8 @@ def replay(rows, cal_dates, sell_key, cost, cap0=CAP0):
             taken.append({
                 "date": r["date"], "code": r["code"], "name": r["name"],
                 "theme": r["theme"], "themeN1": r["themeN1"],
+                "gap": r.get("gap"), "idxD1": r.get("idxD1"),
+                "breakRate": r.get("breakRate"), "circYi": r.get("circYi"),
                 "buyPx": round(f["buyPx"], 3), "sellPx": round(f["sellPx"], 3),
                 "shares": f["shares"], "stake": round(stake, 2),
                 "spend": round(f["spend"], 2),
