@@ -31,6 +31,15 @@ GAP_SELL_TH = 6.0          # 次日竞价高开 ≥ 6% 卖竞价（回测 5~8% �
 MAX_HOLD = 15              # 最长接力天数，防数据异常导致永不出清
 SKIP_GAP_FRAC = 0.94       # 竞价涨幅 ≥ 涨停幅×0.94 视为开盘即涨停、买不进
 
+# S5 加注标记（L4）：S5 命中且竞价跌幅 ≤ S5_DIP_TH，即「跌停开盘」。
+# 依据 reports/三一竞价/sanyi_s5_vs_l4.json（242 日 / 56 笔三一）：
+#     S5 ∩ L4   6 笔  均值 +13.13%  胜率 100%  最差 +5.42%
+#     S5 独有  19 笔  均值  +6.06%  胜率  79%
+#     L4 单独  10 笔  均值 +11.25%  胜率  90%（含唯一亏损笔 600598 北大荒 -4.72%）
+# 它**不改变 S5 的入选条件**，只做加注提醒。阈值沿用回测口径 -9.0：
+# 创业板/科创板 -9% 其实还没到跌停，但回测就是按 -9 切的，保持一致。
+S5_DIP_TH = -9.0
+
 RULE_SHORT = "D日开盘买 · 涨停接力 · 次日高开≥%g%%卖竞价" % GAP_SELL_TH
 RULE_NOTE = (
     "买入 D 日开盘（竞价）价。卖出：① D 日收盘封板且次日竞价高开 ≥" + ("%g" % GAP_SELL_TH) + "%，次日竞价卖；"
@@ -92,6 +101,24 @@ def gap_pct(auction_px, prev_close):
     if not px or not pc:
         return None
     return (px / pc - 1) * 100
+
+
+def is_s5_dip(rec, th=S5_DIP_TH):
+    """S5 命中且竞价跌幅 ≤ th（跌停开盘）—— L4 加注标记。
+
+    只做提醒，不参与入选判定：`s5` 为假时恒为假。
+    """
+    if not rec:
+        return False
+    hit = rec.get("s5")
+    if hit is None:
+        hit = rec.get("isSanyi")
+    if not hit:
+        return False
+    chg = _num(rec.get("changePct"))
+    if chg is None:
+        chg = _num(rec.get("chg"))
+    return chg is not None and chg <= th
 
 
 # ---------------------------------------------------------------- 台账

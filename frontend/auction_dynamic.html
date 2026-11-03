@@ -86,6 +86,9 @@
   .sy{display:inline-block;padding:1px 6px;border-radius:3px;background:linear-gradient(135deg,#d4a017,#a67c00);color:#fff;font-size:11px;font-weight:700;letter-spacing:.5px}
   /* S5 强信号：三一 + 环境 + 题材 三重共振，一年只出现 20 次左右 */
   .sy5{display:inline-block;padding:2px 7px;border-radius:3px;background:linear-gradient(135deg,#ff3b30,#c00a0a);color:#fff;font-size:12px;font-weight:900;letter-spacing:.5px;box-shadow:0 0 6px rgba(255,59,48,.6)}
+  /* L4 加注：S5 且跌停开盘（竞价 ≤ -9%）。S5∩L4 历史 6 笔全胜、均值 +13.13% */
+  .sy5-dip{background:linear-gradient(135deg,#ffb300,#e60000);box-shadow:0 0 10px rgba(255,110,0,.95);animation:s5pulse 1.2s ease-in-out infinite}
+  .sy5-dip .dip-t{margin-left:5px;padding:1px 5px;border-radius:2px;background:rgba(0,0,0,.35);font-size:11px;letter-spacing:0}
   #s5bar:empty{display:none}
   .s5bar{margin:14px 0;padding:16px 20px;border-radius:10px;border:2px solid #ff3b30;background:linear-gradient(135deg,rgba(255,59,48,.16),rgba(192,10,10,.10));animation:s5pulse 1.6s ease-in-out infinite}
   @keyframes s5pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,59,48,.45)}50%{box-shadow:0 0 0 10px rgba(255,59,48,0)}}
@@ -97,6 +100,7 @@
   .s5-row .n{font-size:17px;font-weight:900;color:#ff3b30}
   .s5-row .c{font-family:var(--mono,monospace);font-size:12px;color:var(--text-2)}
   .s5-row .t{font-size:13px;font-weight:700;color:#ffb84d}
+  .s5-row-dip{background:rgba(255,140,0,.16);border-left:3px solid #ffb300}
   .s5-row .k{font-size:12px;color:var(--text-2)}
   .s5-note{margin-top:12px;padding-top:10px;border-top:1px dashed rgba(255,59,48,.35);font-size:12px;color:var(--text-2);line-height:1.7}
   .s5-note b{color:#ff6b60}
@@ -199,7 +203,11 @@ const COLS = {
         : '';
       if(r.s5){
         const th = r.themeName ? `题材 ${esc(r.themeName)}（T-1 涨停 ${r.themeN1} 只）` : '题材 T-1 涨停家数未知';
-        return `<span class="sy5" title="★ S5 强信号（S5 = 三一 + 环境开关 + 题材T-1≥1）｜${th}｜金额第${r.amtRankFull}名 · ${rankNote||('换手第'+r.trfRankFull+'名')}｜242日回测：均值 +8.67%、胜率 84%、一年约 20 次">★S5</span>${btn}`;
+        const pos = `金额第${r.amtRankFull}名 · ${rankNote||('换手第'+r.trfRankFull+'名')}`;
+        if(r.s5Dip){
+          return `<span class="sy5 sy5-dip" title="🔴 S5 + 跌停开盘加注（L4）｜${th}｜竞价 ${Number(r.chg||0).toFixed(2)}%｜${pos}｜S5∩L4 历史 6 笔全胜、均值 +13.13%、最差 +5.42%">★S5<span class="dip-t">跌停加注</span></span>${btn}`;
+        }
+        return `<span class="sy5" title="★ S5 强信号（S5 = 三一 + 环境开关 + 题材T-1≥1）｜${th}｜${pos}｜242日回测：均值 +8.67%、胜率 84%、一年约 20 次">★S5</span>${btn}`;
       }
       return `<span class="sy" title="${tip}｜金额第${r.amtRankFull}名 · ${rankNote||('换手第'+r.trfRankFull+'名')}">★ 三一</span>${btn}`;
     }
@@ -350,6 +358,8 @@ function mapRow(r){
     sanyiOut: r.sanyiOut || null,
     // S5 强信号 = 三一 + 环境开关 + 题材 T-1 涨停家数 >= 1（后端算）
     s5: !!r.s5,
+    // L4 加注 = S5 且竞价跌幅 <= -9%（跌停开盘），不改变入选，只做提醒
+    s5Dip: !!r.s5Dip,
     themeN1: r.themeN1 == null ? null : num(r.themeN1),
     themeName: r.themeName || null,
     themesSource: r.themesSource || null,
@@ -535,26 +545,30 @@ function renderS5(env){
   const box = $('s5bar');
   const list = (env && env.s5List) || [];
   if(!list.length){ box.innerHTML = ''; return; }
+  const nDip = list.filter(x=>x.dip).length;
   const rows = list.map((r, i)=>{
     const amt = r.auctionAmount ? (r.auctionAmount/1e8).toFixed(2)+'亿' : '—';
     const chg = (r.changePct==null) ? '—' : (r.changePct>0?'+':'')+Number(r.changePct).toFixed(2)+'%';
     const t = r.theme ? `题材 <b>${esc(r.theme)}</b>（T-1 涨停 ${r.themeN1} 只）` : '题材家数未知';
-    return `<div class="s5-row">
+    const dipTag = r.dip ? '<span class="sy5 sy5-dip" style="font-size:11px">跌停加注</span>' : '';
+    return `<div class="s5-row${r.dip?' s5-row-dip':''}">
       <span class="n">${i+1}. ${esc(r.name||'')}</span>
       <span class="c">${esc(r.code||'')}</span>
+      ${dipTag}
       <span class="t">${t}</span>
       <span class="k">竞价额 ${amt} · 竞价涨幅 <b class="${r.changePct>0?'up':(r.changePct<0?'down':'')}">${chg}</b></span>
     </div>`;
   }).join('');
   box.innerHTML = `<div class="s5bar">
     <div class="s5-title">🔴 ★ S5 强信号 —— 三一 × 环境 × 题材 三重共振</div>
-    <div class="s5-sub">这种信号一年只出现 20 次左右，今天命中 <b>${list.length}</b> 只</div>
+    <div class="s5-sub">这种信号一年只出现 20 次左右，今天命中 <b>${list.length}</b> 只${nDip?`，其中 <b>${nDip}</b> 只跌停开盘（L4 加注）`:''}</div>
     <div class="s5-list">${rows}</div>
     <div class="s5-note">
       <b>买：</b>今日 09:30 开盘买入。
       <b>卖：</b>涨停接力 —— D+1 起收盘封板才续持，断板当日收盘卖；
       D 日封板且次日竞价高开 ≥6% 则次日竞价直接卖。
       题材家数基准日 ${esc((env&&env.themeN1At)||'—')}。
+      ${nDip?`<br><b>🔴 跌停加注（L4）：</b>竞价跌幅 ≤ −9% 的那几只，历史 S5∩L4 共 6 笔<b>全部盈利</b>、均值 +13.13%、最差 +5.42%；S5 独有 19 笔均值 +6.06%。不改变入选条件，只是加注提示。`:''}
       <br><b>242 日回测（仅 25 笔）：</b>均值 +8.67%/笔 · 胜率 84% · 1 万复利 ×5.14 · 最大回撤 6.1% · 平均空仓 89%。
       <br><b>风险：</b>样本极薄，3 笔贡献 47% 利润；单票不要重仓，严格按接力规则卖。仅供选股参考，非投资建议。
     </div>
@@ -591,6 +605,7 @@ function renderEnv(env){
     + (env.sanyiBearVeto ? `<span class="down">｜空头排列否决</span>` : '')
     + (env.s5N>0
         ? `<span class="up">｜S5 <b>${env.s5N}</b> 只</span>`
+          + (env.s5DipN>0 ? `<span class="up" style="font-weight:900">（跌停加注 ${env.s5DipN}）</span>` : '')
         : (env.sanyiN>0 ? `<span class="dim">｜S5 0 只（题材T-1家数不足）</span>` : ''))
     + `</div>`;
 }

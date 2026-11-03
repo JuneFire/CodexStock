@@ -2504,8 +2504,31 @@ def _auction_top_json_day(date_str):
     return records
 
 
+def _s5_dip_hit(rec):
+    """S5 加注标记（L4：竞价跌停开盘）。规则常量在 sanyi_rules，导入失败按 -9 兜底。"""
+    try:
+        try:
+            from sanyi_rules import is_s5_dip
+        except Exception:
+            from backend.sanyi_rules import is_s5_dip
+    except Exception:
+        is_s5_dip = None
+    if is_s5_dip is not None:
+        try:
+            return bool(is_s5_dip(rec))
+        except Exception:
+            return False
+    hit = rec.get("s5")
+    if hit is None:
+        hit = rec.get("isSanyi")
+    try:
+        return bool(hit) and float(rec.get("changePct")) <= -9.0
+    except (TypeError, ValueError):
+        return False
+
+
 def _fill_theme_n1(date_str, records):
-    """给每行补 themeName / themeN1 / s5 三个字段（与 /api/auction_top/dynamic 同口径）。"""
+    """给每行补 themeName / themeN1 / s5 / s5Dip 四个字段（与 /api/auction_top/dynamic 同口径）。"""
     try:
         try:
             from market_env import env_cached, theme_strength
@@ -2533,6 +2556,7 @@ def _fill_theme_n1(date_str, records):
             r["themeName"] = name1
             r["themeN1"] = n1
             r["s5"] = bool(r.get("isSanyi") and on and (n1 or 0) >= 1)
+            r["s5Dip"] = _s5_dip_hit(r)
         return env
     except Exception as exc:
         print("[sanyi] 题材家数计算失败: %r" % (exc,), flush=True)
@@ -2568,6 +2592,10 @@ def _push_sanyi(date_str, records):
     242 日回测（scripts/analyze_sanyi_clean.py）：S5 25 笔均值 +8.67%、中位 +7.18%、
     胜率 84%、t=4.10；1 万实盘复利 ×5.14、最大回撤 6.1%。一年只有 21 次左右，
     所以命中就重推、无命中就完全静默。
+
+    L4 加注：S5 里竞价跌幅 <= -9%（跌停开盘）的票再标一层。依据
+    reports/三一竞价/sanyi_s5_vs_l4.json：S5∩L4 6 笔均值 +13.13%、胜率 100%、
+    最差 +5.42%；S5 独有 19 笔均值 +6.06%。不改变入选，只做加注提醒。
     """
     records = records or []
     hits = [r for r in records if r.get("isSanyi")]
@@ -2591,13 +2619,20 @@ def _push_sanyi(date_str, records):
         return False
 
     n = len(s5)
-    title = "🔴 S5 强信号 · %s · %s" % (date_str, "、".join(str(r.get("name")) for r in s5))
+    dips = [r for r in s5 if r.get("s5Dip")]
+    nd = len(dips)
+    title = "%s · %s · %s" % (
+        "🔴🔴 S5 跌停加注" if nd else "🔴 S5 强信号",
+        date_str, "、".join(str(r.get("name")) for r in s5))
     head = ("<font color='red'>**★ S5 强信号（三一 + 环境 + 题材全满足）**</font>\n"
             "<font color='red'>**一年只出现 20 次左右，今天命中 %d 只**</font>\n"
             "环境：上证 %s / MA20 %s（%+.2f%%）· 昨日涨停 %s 只 · 开关 **开**\n"
             "题材家数基准日：%s" % (
                 n, env.get("close", "—"), env.get("ma20", "—"), env.get("devMa20Pct") or 0,
                 env.get("prevLimitUp", "—"), env.get("prevLimitUpDate") or "—"))
+    if nd:
+        head += ("\n<font color='red'>**🔴 其中 %d 只跌停开盘（L4 加注）—— "
+                 "S5∩L4 历史 6 笔全胜、均值 +13.13%%、最差 +5.42%%**</font>" % nd)
     els = [{"tag": "markdown", "content": head}, {"tag": "hr"}]
     lines = ["# 🔴 S5 强信号 %s（%d 只）" % (date_str, n), head.replace("<font color='red'>", "").replace("</font>", "").replace("**", "")]
     for r in s5:
@@ -2607,15 +2642,19 @@ def _push_sanyi(date_str, records):
             r.get("trfRankFull"), r.get("turnover") or 0, r.get("changePct") or 0,
             (r.get("floatCap") or 0) / 1e8)
         extra = ["题材 **%s**（T-1 涨停 %s 只）" % (r.get("themeName") or "—", r.get("themeN1") or 0)]
+        dip = bool(r.get("s5Dip"))
+        if dip:
+            extra.insert(0, "🔴 **跌停开盘 %+.2f%%（L4 加注）**" % (r.get("changePct") or 0))
         if r.get("prevStreak"):
             extra.append("昨日 %s 板" % r.get("prevStreak"))
         if r.get("sealAmount"):
             extra.append("封单 %.2f 亿" % (r["sealAmount"] / 1e8))
         body = detail + "\n" + " · ".join(extra)
+        tag = "★S5 🔴跌停加注" if dip else "★S5"
         els.append({"tag": "markdown", "content":
-                    "<font color='red'>**# %s %s  ★S5**</font>\n%s" % (
-                        r.get("code"), r.get("name"), body)})
-        lines.append("## %s %s ★S5" % (r.get("code"), r.get("name")))
+                    "<font color='red'>**# %s %s  %s**</font>\n%s" % (
+                        r.get("code"), r.get("name"), tag, body)})
+        lines.append("## %s %s %s" % (r.get("code"), r.get("name"), tag))
         lines.append(detail)
         lines.append(" · ".join(extra))
     els.append({"tag": "hr"})
@@ -2623,13 +2662,18 @@ def _push_sanyi(date_str, records):
         "买：今日开盘。卖：涨停接力（D+1 起收盘封板才续持，断板当日收盘卖；"
         "D 日封板且次日竞价高开>=6% 则竞价卖）。"
         "242 日回测 S5 均值 +8.67%/笔、1 万复利 ×5.14、回撤 6.1%，样本仅 25 笔。"
+        + ("其中「跌停开盘」加注（S5∩L4）6 笔均值 +13.13%、胜率 100%、最差 +5.42%。"
+           if nd else "") +
         "仅供选股参考，非投资建议。"}]})
     ok = _send_feishu(title, els)
     _send_serverchan(title, "\n\n".join(lines))
     if ok:
         _SANYI_PUSHED.add(date_str)
-        print("[sanyi] 🔴 S5 强信号已推送 %s：%s" % (
-            date_str, "、".join(str(r.get("name")) for r in s5)), flush=True)
+        print("[sanyi] %s 已推送 %s：%s%s" % (
+            "🔴🔴 S5 跌停加注" if nd else "🔴 S5 强信号", date_str,
+            "、".join(str(r.get("name")) for r in s5),
+            ("（其中跌停开盘：%s）" % "、".join(str(r.get("name")) for r in dips)) if nd else ""),
+            flush=True)
     return ok
 
 
@@ -5876,11 +5920,13 @@ class Handler(SimpleHTTPRequestHandler):
                     r["themeN1"] = n1
                     on = bool((env or {}).get("sanyiOn"))
                     r["s5"] = bool(r.get("isSanyi") and on and (n1 or 0) >= 1)
+                    r["s5Dip"] = _s5_dip_hit(r)
                     if r["s5"]:
                         s5List.append({"code": code, "name": r.get("name"),
                                        "theme": name1, "themeN1": n1,
                                        "auctionAmount": r.get("auctionAmount"),
-                                       "changePct": r.get("changePct")})
+                                       "changePct": r.get("changePct"),
+                                       "dip": bool(r.get("s5Dip"))})
             except Exception as exc:
                 themeErr = str(exc)
                 print("[sanyi] 题材家数计算失败: %r" % (exc,), flush=True)
@@ -5890,6 +5936,7 @@ class Handler(SimpleHTTPRequestHandler):
             env["sanyiExcluded"] = sum(1 for r in rows if r.get("sanyiOut") == "cap")
             env["sanyiN"] = sum(1 for r in rows if r.get("isSanyi"))
             env["s5N"] = len(s5List)
+            env["s5DipN"] = sum(1 for x in s5List if x.get("dip"))
             env["s5List"] = s5List
             env["themeN1At"] = env.get("prevLimitUpDate")
             if themeErr:
