@@ -103,8 +103,21 @@ def gap_pct(auction_px, prev_close):
     return (px / pc - 1) * 100
 
 
+def is_dip(rec, th=S5_DIP_TH):
+    """竞价跌幅 ≤ th（跌停开盘）—— L4 判定，不看是否三一。
+
+    返回值只回答「今天是不是大幅低开」，环境开关由调用方另外判。
+    """
+    if not rec:
+        return False
+    chg = _num(rec.get("changePct"))
+    if chg is None:
+        chg = _num(rec.get("chg"))
+    return chg is not None and chg <= th
+
+
 def is_s5_dip(rec, th=S5_DIP_TH):
-    """S5 命中且竞价跌幅 ≤ th（跌停开盘）—— L4 加注标记。
+    """S5 命中且竞价跌幅 ≤ th —— S5 内部的 L4 加注标记。
 
     只做提醒，不参与入选判定：`s5` 为假时恒为假。
     """
@@ -115,10 +128,7 @@ def is_s5_dip(rec, th=S5_DIP_TH):
         hit = rec.get("isSanyi")
     if not hit:
         return False
-    chg = _num(rec.get("changePct"))
-    if chg is None:
-        chg = _num(rec.get("chg"))
-    return chg is not None and chg <= th
+    return is_dip(rec, th)
 
 
 # ---------------------------------------------------------------- 台账
