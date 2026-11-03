@@ -2520,12 +2520,16 @@ def _fill_theme_n1(date_str, records):
         on = bool(env.get("sanyiOn"))
         for r in records or []:
             code = str(r.get("code") or "").zfill(6)
-            ths = r.get("themes")
-            if not (isinstance(ths, list) and ths):
-                ths = theme_cache.themes_of(code)
-                if ths:
-                    r["themes"] = ths
-            name1, n1 = theme_strength(ths, prev_date) if prev_date else (None, None)
+            had = bool(r.get("themes"))
+            merged = []
+            for t in list(r.get("themes") or []) + list(theme_cache.themes_of(code) or []):
+                t = (t or "").strip()
+                if t and t not in merged:
+                    merged.append(t)
+            if merged:
+                r["themes"] = merged
+                r["themesSource"] = "archive+cache" if had else "cache"
+            name1, n1 = theme_strength(merged, prev_date) if prev_date else (None, None)
             r["themeName"] = name1
             r["themeN1"] = n1
             r["s5"] = bool(r.get("isSanyi") and on and (n1 or 0) >= 1)
@@ -5854,11 +5858,19 @@ class Handler(SimpleHTTPRequestHandler):
                 for r in rows:
                     code = str(r.get("code") or "").zfill(6)
                     ths = r.get("themes")
-                    if not (isinstance(ths, list) and ths):
-                        ths = theme_cache.themes_of(code)
-                        if ths:
-                            r["themes"] = ths
-                            r["themesSource"] = "cache"
+                    cache_ths = theme_cache.themes_of(code)
+                    # 同花顺主源没有概念标签，_auction_dyn_enrich 只能把 industry 塞进 themes；
+                    # 行业名几乎不会出现在涨停原因文本里，会让 themeN1 恒为 0（S5 永死）。
+                    # 所以缓存里的概念标签必须并进来，而不是「有 themes 就不查缓存」。
+                    merged = []
+                    for t in list(ths or []) + list(cache_ths or []):
+                        t = (t or "").strip()
+                        if t and t not in merged:
+                            merged.append(t)
+                    if merged:
+                        r["themes"] = merged
+                        r["themesSource"] = ("archive+cache" if ths else "cache")
+                    ths = merged
                     name1, n1 = theme_strength(ths, prev_date) if prev_date else (None, None)
                     r["themeName"] = name1
                     r["themeN1"] = n1
