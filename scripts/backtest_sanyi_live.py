@@ -99,6 +99,11 @@ def build():
             "theme": r.get("theme"), "themeN": r.get("themeN"),
             "themeN1": r.get("themeN1"),
             "dev20D1": r.get("dev20D1"), "bearD1": bool(r.get("bearD1")),
+            # 以下均为 D 日 09:25 或 D-1 收盘即已知的干净变量（无未来函数）
+            "gap": r.get("gap"), "idxD1": r.get("idxD1"),
+            "prevLimitUp": r.get("prevLimitUp"), "breakRate": r.get("breakRate"),
+            "amtYi": r.get("amtYi"), "trfPct": r.get("trfPct"), "vr": r.get("vr"),
+            "circYi": r.get("circYi"), "ps": r.get("ps"),
             "d_lu": w["d_lu"], "buy_raw": buy_raw,
             "sell_c1": sell_c1, "sell_lu": sell_lu, "lu_hold": hold,
         })
@@ -152,6 +157,8 @@ def fill(stake, buy_raw, sell_raw, cost):
 # ---------------------------------------------------------------- 组合回放
 def replay(rows, cal_dates, sell_key, cost, cap0=CAP0):
     """单槽位复利。sell_key: 'sell_c1' 收盘卖 | 'sell_lu' 涨停接力。"""
+    if sell_key == "lu":
+        sell_key = "sell_lu"
     cidx = {d: i for i, d in enumerate(cal_dates)}
     items = []
     for r in rows:
