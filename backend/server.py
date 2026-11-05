@@ -2794,11 +2794,34 @@ def _run_auction_top_sample():
                 print("[auction-top] 悟道增强跳过: %s" % stats["error"], flush=True)
             else:
                 snap["records"] = merged
-                ok2, _ = save_auction_top_file(snap)
-                print("[auction-top] 悟道增强 OK：主源 %d + 新增 %d = %d 只（纠偏 %d 只 / 补字段 %d 只）%s" % (
+                print("[auction-top] 悟道增强 OK：主源 %d + 新增 %d = %d 只（纠偏 %d 只 / 补字段 %d 只）" % (
                     stats["tencent"], stats["added"], stats["total"],
-                    stats.get("corrected", 0), stats["enriched"],
-                    "" if ok2 else "（重写文件失败）"), flush=True)
+                    stats.get("corrected", 0), stats["enriched"]), flush=True)
+        # 封单额兜底：悟道的 limitBuyAmount 只覆盖涨停/强势股（实测 57/139），
+        # 其余票在竞价窗口内用腾讯买一挂单额补齐——收盘后买一就变收盘盘口，不能再抓。
+        if _in_auction_window(datetime.now()):
+            missing = [r.get("code") for r in snap["records"]
+                       if r.get("code") and not to_float(r.get("sealAmount"))]
+            if missing:
+                try:
+                    quotes = fetch_seal_quotes(missing) or {}
+                except Exception as exc:
+                    quotes = {}
+                    print("[auction-top] 封单额兜底失败: %r" % (exc,), flush=True)
+                filled = 0
+                for r in snap["records"]:
+                    if to_float(r.get("sealAmount")):
+                        continue
+                    q = quotes.get(r.get("code")) or {}
+                    if to_float(q.get("sealAmount")):
+                        r["sealAmount"] = q["sealAmount"]
+                        r["sealFromBid1"] = True  # 买一挂单额，不是涨停封单
+                        filled += 1
+                print("[auction-top] 封单额兜底：缺 %d 只，腾讯买一补齐 %d 只" % (
+                    len(missing), filled), flush=True)
+        ok2, _ = save_auction_top_file(snap)
+        if not ok2:
+            print("[auction-top] 重写文件失败", flush=True)
         # 文件归档是权威降级源；同时写 MySQL，数据库不可用只记日志不影响页面
         if not db.save_auction_top(snap["records"]):
             print("[auction-top] MySQL 入库失败: %s" % db.last_error(), flush=True)
@@ -5889,6 +5912,11 @@ class Handler(SimpleHTTPRequestHandler):
                     r["lbuy0915"] = _pick("09:15", "lbuy")
                     r["lbuy0920t"] = _pick("09:20", "lbuy")
                     r["lbuy0925"] = _pick("09:25", "lbuy")
+                    # 封单额缺失时用 09:25 时点的买一挂单额补（悟道 limitBuyAmount 只覆盖
+                    # 涨停/强势股，实测 57/139；seal 存档不要求涨停，正好补剩下的）
+                    if not to_float(r.get("sealAmount")) and to_float(r["seal0925"]):
+                        r["sealAmount"] = r["seal0925"]
+                        r["sealFromBid1"] = True
                     # 09:25 涨停委买额以存档为准（实时买一仅作为窗口内补充）
                     if r["lbuy0925"]:
                         r["lbuy"] = r["lbuy0925"]

@@ -232,12 +232,14 @@ const COLS = {
   plt:   {label:'昨日板型',       w:76,  align:'left', render:r=>r.plt?`<span class="dim">${esc(r.plt)}</span>`:'<span class="neu">—</span>'},
   seal:  {label:'封单额',         w:86,  render:r=>{
     if(!(r.seal>0)) return '<span class="neu">—</span>';
-    // 只有竞价封住涨停，这笔买盘才算「封单」
+    // 竞价封住涨停：涨停价上的买盘就是真封单，加粗
     if(r.isLimitUp) return `<b>${yi(r.seal)}</b>`;
-    // 悟道源的 seal 本身就是“涨停价上的买盘额”，未封板时根本不是封单 → 不显示
-    if(r.sealIsLimitBid) return '<span class="neu" title="竞价未涨停，没有封单">—</span>';
-    // 本地抓取源是原始买一挂单额，对非涨停股也有意义 → 灰显
-    return `<span class="dim" title="竞价未涨停：这是买一最大挂单额，不是封单">${yi(r.seal)}</span>`;
+    // 未涨停时两者口径不同，但都是「大单排队」的强度信号，灰显而不是隐藏：
+    //   悟道源 → 涨停价上的买盘额；本地源 → 买一最大挂单额
+    const tip = r.sealFromBid1 ? '竞价未涨停：买一最大挂单额，不是封单'
+                : (r.sealIsLimitBid ? '竞价未涨停：涨停价上的买盘额，不是封单'
+                                    : '竞价未涨停：买一最大挂单额，不是封单');
+    return `<span class="dim" title="${tip}">${yi(r.seal)}</span>`;
   }},
   amtSealRatio:{label:'金额封单比', w:100, render:r=>{
     // 封单额 = 涨停价上的买盘。竞价没封住涨停就没有“封单”，比值无意义，
@@ -358,6 +360,7 @@ function mapRow(r){
     lbuySource: r.lbuySource,
     isLimitUp: !!r.isLimitUp,          // 竞价是否封住涨停（后端算：openPx vs limitUpPrice）
     sealIsLimitBid: !!r.sealIsLimitBid, // 封单额是否只是“涨停价挂单”而非真封单
+    sealFromBid1: !!r.sealFromBid1,     // 封单额是否由腾讯买一挂单兜底补的
     // 竞价三一（后端算：全市场金额前三 + 换手第一）
     isSanyi: !!r.isSanyi,
     amtRankFull: num(r.amtRankFull),
