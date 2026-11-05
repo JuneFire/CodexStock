@@ -166,15 +166,26 @@ _FILL_KEYS = (
     "finalSealAmount", "prevStreak", "prevLimitUpType",
 )
 
+# 竞价额是「09:15-09:25 不断撑合累加」的量，抓早了只会偏小；悟道给的是 09:25 终值。
+# 所以悟道竞价额明显大于本地时，说明本地快照抓早了，整组竞价字段以悟道为准。
+# 2026-11 实测：09:25:09 采的 17 天里有 13 天偏小，最大 -85%（宁德时代 1.19 亿 vs 7.88 亿）。
+_OVERRIDE_KEYS = (
+    "auctionAmount", "auctionVolume", "turnover", "floatCap", "changePct",
+    "price", "open", "prevClose", "volumeRatio",
+)
+
 
 def merge_into(base_rows, wudao_rows):
-    """把悟道行并进腾讯基座：同 code 只补字段，新 code 整行追加。
+    """把悟道行并进主源基座：同 code 补字段/纠偏，新 code 整行追加。
 
+    两种情况：
+      · 本地抓早了（竞价额偏小）→ 用悟道终值覆盖整组竞价字段（corrected）
+      · 本地字段空缺（题材/连板/尾秒）→ 只补空位（enriched）
     返回 (merged_rows, stats)。不修改入参。
     """
     merged = [dict(r) for r in base_rows]
     index = {str(r.get("code")): r for r in merged}
-    added = enriched = 0
+    added = enriched = corrected = 0
     for w in wudao_rows:
         code = str(w.get("code") or "")
         if not code:
@@ -186,6 +197,16 @@ def merge_into(base_rows, wudao_rows):
             index[code] = local
             added += 1
             continue
+        wa = _num(local.get("auctionAmount")) or 0.0
+        la = _num(cur.get("auctionAmount")) or 0.0
+        if wa > la * 1.001:
+            # 本地快照抓早了：金额、价格、换手、涨幅全部以悟道 09:25 终值为准
+            for k in _OVERRIDE_KEYS:
+                if local.get(k) is not None:
+                    cur[k] = local[k]
+            if local.get("sealAmount"):
+                cur["sealAmount"] = local["sealAmount"]
+            corrected += 1
         for k in _FILL_KEYS:
             v = local.get(k)
             if v in (None, "", []) or v == 0:
@@ -201,7 +222,8 @@ def merge_into(base_rows, wudao_rows):
     for i, r in enumerate(merged, start=1):
         r["rank"] = i
     return merged, {"tencent": len(base_rows), "wudao": len(wudao_rows),
-                    "added": added, "enriched": enriched, "total": len(merged)}
+                    "added": added, "enriched": enriched, "corrected": corrected,
+                    "total": len(merged)}
 
 
 def fetch_and_merge(base_rows, trade_date, key=None):

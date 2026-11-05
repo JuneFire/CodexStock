@@ -156,6 +156,12 @@ AUCTION_DYN_CACHE = {"ts": 0.0, "date": None, "rows": None}
 _SANYI_PUSHED = set()
 AUCTION_TOP_RANK_N = 60     # 竞价榜页面取竞价额前 N（按日期归档）
 AUCTION_USE_HITHINK = True  # 09:25 竞价榜主源用同花顺全市场快照（腾讯在 09:25:0x 常没刷新成交额）
+# 竞价额是「不断撑合累加」的量，抓早了只会偏小。2026-11 实测：09:25:09 那一版
+# 17 个交易日里有 13 天漏量，最大偏差 -85%（2026-10-22 宁德时代 1.19 亿 vs 真实 7.88 亿）。
+# 所以：缓到 09:25:00 + SETTLE 再抓，窗口内多采几轮取合计最大的一版。
+AUCTION_TOP_SETTLE_SECONDS = 45   # 09:25:00 撑合后等待数据落定的秒数
+AUCTION_TOP_SAMPLE_ROUNDS = 2     # 窗口内采样轮数（取竞价额合计最大者）
+AUCTION_TOP_ROUND_GAP = 25        # 两轮采样间隔秒数
 
 PLAN_FETCH_HM = 8 * 60 + 30  # 早晨 8:30 自动生成当天早盘预案
 PLAN_NEWS_LIMIT = 8          # 预案引用的隔夜快讯条数
@@ -2739,7 +2745,31 @@ def _push_sanyi(date_str, records):
 
 def _run_auction_top_sample():
     try:
-        snap = fetch_auction_top()
+        # 窗口内多采几轮，取竞价额合计最大的一版：早抓只会偏小，合计最大即最接近终值。
+        best, total_best = None, 0.0
+        for rnd in range(max(1, AUCTION_TOP_SAMPLE_ROUNDS)):
+            if rnd:
+                time.sleep(AUCTION_TOP_ROUND_GAP)
+            tag = datetime.now().strftime("%H:%M:%S")
+            try:
+                cur = fetch_auction_top()
+            except Exception as exc:
+                print("[auction-top] 第 %d 轮抓取失败(%s): %r" % (rnd + 1, tag, exc), flush=True)
+                continue
+            total = sum((r.get("auctionAmount") or 0) for r in cur.get("records") or [])
+            print("[auction-top] 第 %d 轮 %s：%s源 %d 条，竞价额合计 %.2f 亿" % (
+                rnd + 1, tag, cur.get("source") or "主", len(cur.get("records") or []),
+                total / 1e8), flush=True)
+            if best is None or total > total_best:
+                best, total_best = cur, total
+        if best is None:
+            print("[auction-top] 全部采样轮次失败，跳过", flush=True)
+            return
+        snap = best
+        top = max(snap["records"], key=lambda r: r.get("auctionAmount") or 0)
+        print("[auction-top] 采用合计最大的一版：合计 %.2f 亿 / 最大单票 %.4f 亿（%s %s）" % (
+            total_best / 1e8, (top.get("auctionAmount") or 0) / 1e8,
+            top.get("code"), top.get("name")), flush=True)
         ok, msg = save_auction_top_file(snap)
         if not ok:
             print("[auction-top] %s，跳过落盘" % msg, flush=True)
@@ -2765,8 +2795,9 @@ def _run_auction_top_sample():
             else:
                 snap["records"] = merged
                 ok2, _ = save_auction_top_file(snap)
-                print("[auction-top] 悟道增强 OK：主源 %d + 新增 %d = %d 只（补字段 %d 只）%s" % (
-                    stats["tencent"], stats["added"], stats["total"], stats["enriched"],
+                print("[auction-top] 悟道增强 OK：主源 %d + 新增 %d = %d 只（纠偏 %d 只 / 补字段 %d 只）%s" % (
+                    stats["tencent"], stats["added"], stats["total"],
+                    stats.get("corrected", 0), stats["enriched"],
                     "" if ok2 else "（重写文件失败）"), flush=True)
         # 文件归档是权威降级源；同时写 MySQL，数据库不可用只记日志不影响页面
         if not db.save_auction_top(snap["records"]):
@@ -2796,6 +2827,15 @@ def auction_top_fetch_loop(enabled=True):
             continue
         valid, _ = auction_window_status(now)
         if valid and attempts < AUTO_FETCH_MAX_ATTEMPTS:
+            # 09:25:00 刚撑合完的同花顺/腾讯快照往往还没刷新成交额，缓 SETTLE 秒再抓
+            settle = now.replace(hour=9, minute=25, second=0, microsecond=0) + timedelta(
+                seconds=AUCTION_TOP_SETTLE_SECONDS)
+            if now < settle:
+                wait = (settle - now).total_seconds()
+                print("[auction-top] 09:25 撑合数据未落定，等待 %.0f 秒（%s 后再抓）" % (
+                    wait, settle.strftime("%H:%M:%S")), flush=True)
+                time.sleep(min(wait, AUTO_FETCH_TICK * 3))
+                continue
             print("[auction-top] 交易日竞价已结束，开始抓取竞价榜", flush=True)
             try:
                 _run_auction_top_sample()
